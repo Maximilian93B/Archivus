@@ -1,0 +1,83 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: archivus-postgres
+    environment:
+      POSTGRES_DB: archivus_dev
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: archivus-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Archivus Application
+  archivus:
+    build: .
+    container_name: archivus-app
+    environment:
+      - ENVIRONMENT=development
+      - DATABASE_URL=postgres://postgres:postgres@postgres:5432/archivus_dev?sslmode=disable
+      - REDIS_URL=redis://redis:6379
+      - PORT=8080
+      - JWT_SECRET=dev-jwt-secret-change-in-production
+      - STORAGE_TYPE=local
+      - STORAGE_PATH=/app/uploads
+      - ALLOWED_ORIGINS=http://localhost:3000,http://localhost:8080
+      - ENABLE_AI_PROCESSING=true
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./uploads:/app/uploads
+      - ./.env:/app/.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Ollama (Local AI - Optional)
+  ollama:
+    image: ollama/ollama:latest
+    container_name: archivus-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+    restart: unless-stopped
+    profiles:
+      - "ai-local"
+
+volumes:
+  postgres_data:
+  redis_data:
+  ollama_data:
+
+networks:
+  default:
+    name: archivus-network 
