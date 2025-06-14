@@ -2,182 +2,358 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
-	"github.com/gin-contrib/cors"
-	"github.com/gin-gonic/gin"
-
 	"github.com/archivus/archivus/internal/app/config"
-	"github.com/archivus/archivus/internal/infrastructure/database"
+	"github.com/archivus/archivus/internal/app/handlers"
+	"github.com/archivus/archivus/internal/domain/services"
 	"github.com/archivus/archivus/pkg/logger"
+	"github.com/gin-contrib/cors"
+
+	"github.com/gin-gonic/gin"
 )
 
+// Server represents the HTTP server
 type Server struct {
-	config *config.Config
-	logger *logger.Logger
-	router *gin.Engine
-	server *http.Server
-	db     *database.DB
+	config   *config.Config
+	router   *gin.Engine
+	server   *http.Server
+	handlers *Handlers
+	logger   *logger.Logger
 }
 
-// New creates a new server instance
-func New(cfg *config.Config, log *logger.Logger) (*Server, error) {
-	// Initialize database (optional for development)
-	var db *database.DB
-	var err error
+// Handlers holds all HTTP handlers
+type Handlers struct {
+	AuthHandler     *handlers.AuthHandler
+	DocumentHandler *handlers.DocumentHandler
+	// Add other handlers as they're created
+}
 
-	if cfg.GetDatabaseURL() != "" {
-		db, err = database.New(cfg.GetDatabaseURL())
-		if err != nil {
-			log.Warn("Failed to initialize database, continuing without database", "error", err)
-			db = nil
-		}
-	}
-
-	// Configure Gin mode based on environment
-	if cfg.IsProduction() {
+// NewServer creates a new HTTP server instance
+func NewServer(
+	cfg *config.Config,
+	services *Services,
+	logger *logger.Logger,
+) *Server {
+	// Set Gin mode based on environment
+	if cfg.Environment == "production" {
 		gin.SetMode(gin.ReleaseMode)
 	}
 
 	// Create router
 	router := gin.New()
 
-	// Add middleware
-	router.Use(gin.Recovery())
-	router.Use(corsMiddleware(cfg))
-	router.Use(loggingMiddleware(log))
-
-	// Create server
-	server := &Server{
-		config: cfg,
-		logger: log,
-		router: router,
-		db:     db,
+	// Create handlers
+	handlers := &Handlers{
+		AuthHandler:     handlers.NewAuthHandler(services.UserService, services.TenantService),
+		DocumentHandler: handlers.NewDocumentHandler(services.DocumentService, services.UserService),
 	}
 
-	// Setup routes
+	server := &Server{
+		config:   cfg,
+		router:   router,
+		handlers: handlers,
+		logger:   logger,
+	}
+
+	server.setupMiddleware()
 	server.setupRoutes()
 
-	return server, nil
+	return server
+}
+
+// Services holds all business services
+type Services struct {
+	UserService      *services.UserService
+	TenantService    *services.TenantService
+	DocumentService  *services.DocumentService
+	WorkflowService  *services.WorkflowService
+	AIService        *services.AIService
+	AnalyticsService *services.AnalyticsService
+}
+
+// setupMiddleware configures all middleware
+func (s *Server) setupMiddleware() {
+	// Recovery middleware
+	s.router.Use(gin.Recovery())
+
+	// Logging middleware
+	s.router.Use(s.loggingMiddleware())
+
+	// Security middleware
+	s.router.Use(s.securityMiddleware())
+
+	// CORS middleware
+	s.router.Use(cors.New(cors.Config{
+		AllowOrigins:     s.getAllowedOrigins(),
+		AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization", "X-Tenant"},
+		ExposeHeaders:    []string{"Content-Length"},
+		AllowCredentials: true,
+		MaxAge:           12 * time.Hour,
+	}))
+
+	// Request size limit middleware
+	s.router.Use(s.requestSizeLimitMiddleware())
+
+	// Rate limiting middleware (placeholder)
+	s.router.Use(s.rateLimitMiddleware())
+}
+
+// setupRoutes configures all API routes
+func (s *Server) setupRoutes() {
+	// Health check endpoint
+	s.router.GET("/health", s.healthCheck)
+	s.router.GET("/ready", s.readinessCheck)
+
+	// API version 1
+	v1 := s.router.Group("/api/v1")
+	{
+		// Register handler routes
+		s.handlers.AuthHandler.RegisterRoutes(v1)
+		s.handlers.DocumentHandler.RegisterRoutes(v1)
+
+		// Add other handler routes as they're created
+		// s.handlers.WorkflowHandler.RegisterRoutes(v1)
+		// s.handlers.AnalyticsHandler.RegisterRoutes(v1)
+	}
+
+	// Serve static files (if any)
+	s.router.Static("/static", "./web/static")
+
+	// Catch-all route for SPA
+	s.router.NoRoute(func(c *gin.Context) {
+		c.JSON(http.StatusNotFound, gin.H{
+			"error":   "route_not_found",
+			"message": "The requested route does not exist",
+			"path":    c.Request.URL.Path,
+		})
+	})
 }
 
 // Start starts the HTTP server
 func (s *Server) Start() error {
+	// Create HTTP server
 	s.server = &http.Server{
-		Addr:         ":" + s.config.Server.Port,
-		Handler:      s.router,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		Addr:           ":" + s.config.Server.Port,
+		Handler:        s.router,
+		ReadTimeout:    15 * time.Second,
+		WriteTimeout:   15 * time.Second,
+		IdleTimeout:    60 * time.Second,
+		MaxHeaderBytes: 1 << 20, // 1MB
 	}
 
-	return s.server.ListenAndServe()
+	// Start server in a goroutine
+	go func() {
+		s.logger.Info("Starting HTTP server", "port", s.config.Server.Port)
+		if err := s.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			s.logger.Error("Failed to start server", "error", err)
+		}
+	}()
+
+	return s.waitForShutdown()
 }
 
-// Shutdown gracefully shuts down the server
-func (s *Server) Shutdown(ctx context.Context) error {
+// StartTLS starts the HTTPS server
+func (s *Server) StartTLS(certFile, keyFile string) error {
+	// Create HTTPS server
+	s.server = &http.Server{
+		Addr:           ":" + s.config.Server.Port,
+		Handler:        s.router,
+		ReadTimeout:    15 * time.Second,
+		WriteTimeout:   15 * time.Second,
+		IdleTimeout:    60 * time.Second,
+		MaxHeaderBytes: 1 << 20, // 1MB
+	}
+
+	// Start HTTPS server in a goroutine
+	go func() {
+		s.logger.Info("Starting HTTPS server", "port", s.config.Server.Port)
+		if err := s.server.ListenAndServeTLS(certFile, keyFile); err != nil && err != http.ErrServerClosed {
+			s.logger.Error("Failed to start HTTPS server", "error", err)
+		}
+	}()
+
+	return s.waitForShutdown()
+}
+
+// waitForShutdown waits for shutdown signal and gracefully shuts down the server
+func (s *Server) waitForShutdown() error {
+	// Create channel to receive OS signals
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+
+	// Wait for signal
+	<-quit
 	s.logger.Info("Shutting down server...")
 
-	// Close database connection if it exists
-	if s.db != nil {
-		if err := s.db.Close(); err != nil {
-			s.logger.Error("Error closing database connection", "error", err)
-		}
+	// Create context with timeout for shutdown
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Shutdown server
+	if err := s.server.Shutdown(ctx); err != nil {
+		s.logger.Error("Server forced to shutdown", "error", err)
+		return err
 	}
 
-	// Shutdown HTTP server
-	return s.server.Shutdown(ctx)
+	s.logger.Info("Server exited")
+	return nil
 }
 
-// setupRoutes configures all application routes
-func (s *Server) setupRoutes() {
-	// Health check endpoint
-	s.router.GET("/health", s.healthCheck)
+// Stop stops the server
+func (s *Server) Stop() error {
+	if s.server != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return s.server.Shutdown(ctx)
+	}
+	return nil
+}
 
-	// API v1 group
-	v1 := s.router.Group("/api/v1")
-	{
-		// Public routes
-		public := v1.Group("")
-		{
-			public.GET("/status", s.systemStatus)
+// Middleware functions
+
+// loggingMiddleware logs HTTP requests
+func (s *Server) loggingMiddleware() gin.HandlerFunc {
+	return gin.LoggerWithFormatter(func(param gin.LogFormatterParams) string {
+		return fmt.Sprintf("%s - [%s] \"%s %s %s %d %s \"%s\" %s\"\n",
+			param.ClientIP,
+			param.TimeStamp.Format(time.RFC1123),
+			param.Method,
+			param.Path,
+			param.Request.Proto,
+			param.StatusCode,
+			param.Latency,
+			param.Request.UserAgent(),
+			param.ErrorMessage,
+		)
+	})
+}
+
+// securityMiddleware adds security headers
+func (s *Server) securityMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// Security headers
+		c.Header("X-Content-Type-Options", "nosniff")
+		c.Header("X-Frame-Options", "DENY")
+		c.Header("X-XSS-Protection", "1; mode=block")
+		c.Header("Referrer-Policy", "strict-origin-when-cross-origin")
+
+		// Only add HSTS header for HTTPS
+		if c.Request.TLS != nil {
+			c.Header("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
 		}
 
-		// Protected routes (will be implemented later)
-		// protected := v1.Group("")
-		// protected.Use(authMiddleware())
-		// {
-		//     // Document routes, user routes, etc.
-		// }
+		// Content Security Policy (adjust as needed)
+		c.Header("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'")
+
+		c.Next()
 	}
 }
 
-// Health check handler
+// requestSizeLimitMiddleware limits request body size
+func (s *Server) requestSizeLimitMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// Set different limits based on route
+		var maxSize int64 = 1 << 20 // 1MB default
+
+		// Larger limit for file uploads
+		if c.Request.URL.Path == "/api/v1/documents/upload" {
+			maxSize = s.config.Limits.MaxFileSize // From config
+		}
+
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxSize)
+		c.Next()
+	}
+}
+
+// rateLimitMiddleware implements rate limiting (placeholder)
+func (s *Server) rateLimitMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// TODO: Implement rate limiting using Redis
+		// For now, just pass through
+		c.Next()
+	}
+}
+
+// Health check handlers
+
+// healthCheck returns server health status
 func (s *Server) healthCheck(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"status":      "healthy",
-		"timestamp":   time.Now().UTC(),
+		"timestamp":   time.Now().UTC().Format(time.RFC3339),
+		"version":     "1.0.0",
 		"environment": s.config.Environment,
 	})
 }
 
-// System status handler
-func (s *Server) systemStatus(c *gin.Context) {
-	// Check database connection
-	dbStatus := "not_configured"
-	if s.db != nil {
-		if err := s.db.Ping(); err != nil {
-			dbStatus = "unhealthy"
-		} else {
-			dbStatus = "healthy"
+// readinessCheck checks if server is ready to handle requests
+func (s *Server) readinessCheck(c *gin.Context) {
+	// TODO: Add checks for database, Redis, external services
+	checks := map[string]string{
+		"database": "ok",
+		"redis":    "ok",
+		"storage":  "ok",
+	}
+
+	allHealthy := true
+	for _, status := range checks {
+		if status != "ok" {
+			allHealthy = false
+			break
 		}
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"status":    "ok",
-		"database":  dbStatus,
-		"timestamp": time.Now().UTC(),
-		"version":   "1.0.0",
+	statusCode := http.StatusOK
+	if !allHealthy {
+		statusCode = http.StatusServiceUnavailable
+	}
+
+	c.JSON(statusCode, gin.H{
+		"status": map[string]string{"ready": func() string {
+			if allHealthy {
+				return "true"
+			} else {
+				return "false"
+			}
+		}()},
+		"checks":    checks,
+		"timestamp": time.Now().UTC().Format(time.RFC3339),
 	})
 }
 
-// corsMiddleware configures CORS
-func corsMiddleware(cfg *config.Config) gin.HandlerFunc {
-	corsConfig := cors.Config{
-		AllowOrigins:     cfg.Server.AllowedOrigins,
-		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"},
-		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization", "X-Tenant-ID"},
-		ExposeHeaders:    []string{"Content-Length", "X-Request-ID"},
-		AllowCredentials: true,
-		MaxAge:           12 * time.Hour,
+// Helper functions
+
+// getAllowedOrigins returns allowed CORS origins based on environment
+func (s *Server) getAllowedOrigins() []string {
+	if s.config.Environment == "production" {
+		// In production, only allow specific domains
+		return s.config.Server.AllowedOrigins
 	}
 
-	return cors.New(corsConfig)
+	// In development, allow common local development origins
+	return []string{
+		"http://localhost:3000",
+		"http://localhost:3001",
+		"http://localhost:8080",
+		"http://127.0.0.1:3000",
+		"http://127.0.0.1:3001",
+		"http://127.0.0.1:8080",
+	}
 }
 
-// loggingMiddleware logs HTTP requests
-func loggingMiddleware(log *logger.Logger) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		start := time.Now()
-		path := c.Request.URL.Path
-		raw := c.Request.URL.RawQuery
+// GetRouter returns the Gin router (useful for testing)
+func (s *Server) GetRouter() *gin.Engine {
+	return s.router
+}
 
-		// Process request
-		c.Next()
-
-		// Log request details
-		latency := time.Since(start)
-		if raw != "" {
-			path = path + "?" + raw
-		}
-
-		log.Info("HTTP Request",
-			"method", c.Request.Method,
-			"path", path,
-			"status", c.Writer.Status(),
-			"latency", latency.String(),
-			"client_ip", c.ClientIP(),
-		)
-	}
+// GetServer returns the HTTP server instance
+func (s *Server) GetServer() *http.Server {
+	return s.server
 }

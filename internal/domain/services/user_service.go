@@ -13,7 +13,6 @@ import (
 	"github.com/archivus/archivus/internal/domain/repositories"
 	"github.com/archivus/archivus/internal/infrastructure/database/models"
 	"github.com/google/uuid"
-	"golang.org/x/crypto/bcrypt"
 )
 
 var (
@@ -29,13 +28,12 @@ var (
 	ErrInsufficientPrivileges = errors.New("insufficient privileges")
 )
 
-// UserService handles user management and authentication
+// UserService handles user management and authentication with Supabase
 type UserService struct {
-	userRepo   repositories.UserRepository
-	tenantRepo repositories.TenantRepository
-	auditRepo  repositories.AuditLogRepository
-
-	authService  AuthService
+	userRepo     repositories.UserRepository
+	tenantRepo   repositories.TenantRepository
+	auditRepo    repositories.AuditLogRepository
+	supabaseAuth SupabaseAuthService
 	emailService EmailService
 	config       UserServiceConfig
 }
@@ -52,16 +50,14 @@ type UserServiceConfig struct {
 	LockoutDurationMins      int
 	RequireEmailVerification bool
 	EnableMFA                bool
-	JWTSecretKey             string
-	JWTExpiryHours           int
 }
 
-// NewUserService creates a new user service
+// NewUserService creates a new user service with Supabase
 func NewUserService(
 	userRepo repositories.UserRepository,
 	tenantRepo repositories.TenantRepository,
 	auditRepo repositories.AuditLogRepository,
-	authService AuthService,
+	supabaseAuth SupabaseAuthService,
 	emailService EmailService,
 	config UserServiceConfig,
 ) *UserService {
@@ -69,7 +65,7 @@ func NewUserService(
 		userRepo:     userRepo,
 		tenantRepo:   tenantRepo,
 		auditRepo:    auditRepo,
-		authService:  authService,
+		supabaseAuth: supabaseAuth,
 		emailService: emailService,
 		config:       config,
 	}
@@ -116,7 +112,7 @@ type UserProfile struct {
 	MFAEnabled     bool       `json:"mfa_enabled"`
 }
 
-// CreateUser creates a new user account
+// CreateUser creates a new user account with Supabase Auth
 func (s *UserService) CreateUser(ctx context.Context, params CreateUserParams) (*models.User, error) {
 	// Validate email format
 	if !s.isValidEmail(params.Email) {
@@ -133,34 +129,41 @@ func (s *UserService) CreateUser(ctx context.Context, params CreateUserParams) (
 		return nil, ErrInvalidRole
 	}
 
-	// Check if user already exists
+	// Check if user already exists locally
 	existing, err := s.userRepo.GetByEmail(ctx, params.TenantID, params.Email)
 	if err == nil && existing != nil {
 		return nil, ErrUserExists
 	}
 
-	// Hash password
-	hashedPassword, err := s.hashPassword(params.Password)
-	if err != nil {
-		return nil, fmt.Errorf("failed to hash password: %w", err)
+	// Create user in Supabase Auth first
+	metadata := map[string]interface{}{
+		"tenant_id":  params.TenantID.String(),
+		"first_name": params.FirstName,
+		"last_name":  params.LastName,
+		"role":       string(params.Role),
+		"department": params.Department,
+		"job_title":  params.JobTitle,
 	}
 
-	// Create user
+	supabaseUser, err := s.supabaseAuth.SignUpWithEmail(params.Email, params.Password, metadata)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create user in Supabase: %w", err)
+	}
+
+	// Create user in local database
 	user := &models.User{
-		ID:                uuid.New(),
-		TenantID:          params.TenantID,
-		Email:             strings.ToLower(params.Email),
-		PasswordHash:      hashedPassword,
-		FirstName:         params.FirstName,
-		LastName:          params.LastName,
-		Role:              params.Role,
-		Department:        params.Department,
-		JobTitle:          params.JobTitle,
-		IsActive:          true,
-		EmailVerified:     !s.config.RequireEmailVerification,
-		PasswordChangedAt: time.Now(),
-		MFAEnabled:        false,
-		Preferences:       models.JSONB{},
+		ID:            supabaseUser.ID, // Use Supabase UUID
+		TenantID:      params.TenantID,
+		Email:         strings.ToLower(params.Email),
+		FirstName:     params.FirstName,
+		LastName:      params.LastName,
+		Role:          params.Role,
+		Department:    params.Department,
+		JobTitle:      params.JobTitle,
+		IsActive:      true,
+		EmailVerified: supabaseUser.EmailConfirmedAt != nil,
+		MFAEnabled:    false,
+		Preferences:   models.JSONB{},
 		NotificationSettings: models.JSONB{
 			"email_notifications": true,
 			"task_reminders":      true,
@@ -169,23 +172,25 @@ func (s *UserService) CreateUser(ctx context.Context, params CreateUserParams) (
 	}
 
 	if err := s.userRepo.Create(ctx, user); err != nil {
-		return nil, fmt.Errorf("failed to create user: %w", err)
+		// Rollback Supabase user creation if local creation fails
+		s.supabaseAuth.AdminDeleteUser(supabaseUser.ID.String())
+		return nil, fmt.Errorf("failed to create local user: %w", err)
 	}
 
-	// Send email verification if required
-	if s.config.RequireEmailVerification && s.emailService != nil {
-		if err := s.sendEmailVerification(ctx, user); err != nil {
-			// Log but don't fail user creation
-		}
+	// Send welcome email
+	if s.emailService != nil {
+		go func() {
+			s.emailService.SendWelcomeEmail(context.Background(), user.Email, user.FirstName)
+		}()
 	}
 
 	// Create audit log
-	s.createAuditLog(ctx, params.TenantID, params.CreatedBy, user.ID, models.AuditCreate, "User created")
+	s.createAuditLog(ctx, params.TenantID, user.ID, user.ID, models.AuditCreate, "User created")
 
 	return user, nil
 }
 
-// Login authenticates a user and returns a token
+// Login authenticates a user using Supabase
 func (s *UserService) Login(ctx context.Context, params LoginParams) (*LoginResult, error) {
 	// Get tenant by subdomain
 	tenant, err := s.tenantRepo.GetBySubdomain(ctx, params.TenantSubdomain)
@@ -198,10 +203,16 @@ func (s *UserService) Login(ctx context.Context, params LoginParams) (*LoginResu
 		return nil, errors.New("tenant account suspended")
 	}
 
-	// Get user by email
-	user, err := s.userRepo.GetByEmail(ctx, tenant.ID, params.Email)
+	// Authenticate with Supabase
+	authResponse, err := s.supabaseAuth.SignInWithEmail(params.Email, params.Password)
 	if err != nil {
 		return nil, ErrInvalidCredentials
+	}
+
+	// Sync Supabase user with local database
+	user, err := s.syncSupabaseUser(ctx, authResponse.User, tenant.ID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to sync user: %w", err)
 	}
 
 	// Check if user is active
@@ -209,14 +220,7 @@ func (s *UserService) Login(ctx context.Context, params LoginParams) (*LoginResu
 		return nil, ErrUserInactive
 	}
 
-	// Verify password
-	if !s.verifyPassword(params.Password, user.PasswordHash) {
-		// Log failed login attempt
-		s.createAuditLog(ctx, tenant.ID, user.ID, user.ID, models.AuditRead, "Failed login attempt")
-		return nil, ErrInvalidCredentials
-	}
-
-	// Check if MFA is required
+	// Handle MFA if enabled
 	if user.MFAEnabled && params.MFACode == "" {
 		return &LoginResult{
 			RequiresMFA: true,
@@ -230,33 +234,42 @@ func (s *UserService) Login(ctx context.Context, params LoginParams) (*LoginResu
 		}
 	}
 
-	// Generate JWT token
-	token, expiresAt, err := s.authService.GenerateToken(user.ID, tenant.ID, user.Role)
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate token: %w", err)
-	}
-
-	// Generate refresh token
-	refreshToken, err := s.authService.GenerateRefreshToken(user.ID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate refresh token: %w", err)
-	}
-
 	// Update last login
-	if err := s.userRepo.UpdateLastLogin(ctx, user.ID); err != nil {
-		// Log but don't fail login
-	}
+	now := time.Now()
+	user.LastLoginAt = &now
+	s.userRepo.Update(ctx, user)
 
 	// Create audit log
 	s.createAuditLog(ctx, tenant.ID, user.ID, user.ID, models.AuditRead, "User logged in")
 
 	return &LoginResult{
 		User:         user,
-		Token:        token,
-		RefreshToken: refreshToken,
+		Token:        authResponse.AccessToken,
+		RefreshToken: authResponse.RefreshToken,
 		RequiresMFA:  false,
-		ExpiresAt:    expiresAt,
+		ExpiresAt:    authResponse.ExpiresAt,
 	}, nil
+}
+
+// ValidateToken validates a Supabase access token
+func (s *UserService) ValidateToken(ctx context.Context, token string) (*models.User, error) {
+	// Validate token with Supabase
+	supabaseUser, err := s.supabaseAuth.ValidateToken(token)
+	if err != nil {
+		return nil, fmt.Errorf("invalid Supabase token: %w", err)
+	}
+
+	// Get local user
+	user, err := s.userRepo.GetByID(ctx, supabaseUser.ID)
+	if err != nil {
+		return nil, fmt.Errorf("user not found: %w", err)
+	}
+
+	if !user.IsActive {
+		return nil, ErrUserInactive
+	}
+
+	return user, nil
 }
 
 // GetUserProfile gets detailed user profile information
@@ -330,42 +343,47 @@ func (s *UserService) UpdateUser(ctx context.Context, userID uuid.UUID, updates 
 		return nil, fmt.Errorf("failed to update user: %w", err)
 	}
 
+	// Update user in Supabase as well
+	supabaseUpdates := map[string]interface{}{
+		"user_metadata": map[string]interface{}{
+			"first_name": user.FirstName,
+			"last_name":  user.LastName,
+			"role":       string(user.Role),
+			"department": user.Department,
+			"job_title":  user.JobTitle,
+		},
+	}
+
+	// Get user's current token (this would need to be passed or retrieved)
+	// For now, use admin update
+	s.supabaseAuth.AdminUpdateUser(userID.String(), supabaseUpdates)
+
 	// Create audit log
 	s.createAuditLog(ctx, user.TenantID, updatedBy, user.ID, models.AuditUpdate, "User updated")
 
 	return user, nil
 }
 
-// ChangePassword changes a user's password
-func (s *UserService) ChangePassword(ctx context.Context, userID uuid.UUID, currentPassword, newPassword string) error {
-	user, err := s.userRepo.GetByID(ctx, userID)
-	if err != nil {
-		return ErrUserNotFound
-	}
-
-	// Verify current password
-	if !s.verifyPassword(currentPassword, user.PasswordHash) {
-		return ErrInvalidCredentials
-	}
-
+// ChangePassword changes a user's password via Supabase
+func (s *UserService) ChangePassword(ctx context.Context, userID uuid.UUID, accessToken, newPassword string) error {
 	// Validate new password
 	if err := s.validatePassword(newPassword); err != nil {
 		return err
 	}
 
-	// Hash new password
-	hashedPassword, err := s.hashPassword(newPassword)
-	if err != nil {
-		return fmt.Errorf("failed to hash password: %w", err)
-	}
-
-	// Update password
-	user.PasswordHash = hashedPassword
-	user.PasswordChangedAt = time.Now()
-
-	if err := s.userRepo.Update(ctx, user); err != nil {
+	// Update password in Supabase
+	if err := s.supabaseAuth.UpdatePassword(accessToken, newPassword); err != nil {
 		return fmt.Errorf("failed to update password: %w", err)
 	}
+
+	// Update local record
+	user, err := s.userRepo.GetByID(ctx, userID)
+	if err != nil {
+		return ErrUserNotFound
+	}
+
+	user.PasswordChangedAt = time.Now()
+	s.userRepo.Update(ctx, user)
 
 	// Create audit log
 	s.createAuditLog(ctx, user.TenantID, userID, userID, models.AuditUpdate, "Password changed")
@@ -429,44 +447,69 @@ func (s *UserService) DisableMFA(ctx context.Context, userID uuid.UUID, mfaCode 
 	return nil
 }
 
-// DeactivateUser deactivates a user account
-func (s *UserService) DeactivateUser(ctx context.Context, userID, deactivatedBy uuid.UUID) error {
-	user, err := s.userRepo.GetByID(ctx, userID)
+// ResetPassword initiates password reset process via Supabase
+func (s *UserService) ResetPassword(ctx context.Context, tenantSubdomain, email string) error {
+	// Get tenant
+	tenant, err := s.tenantRepo.GetBySubdomain(ctx, tenantSubdomain)
 	if err != nil {
-		return ErrUserNotFound
+		return nil // Don't reveal if tenant exists
 	}
 
-	user.IsActive = false
-	user.UpdatedAt = time.Now()
-
-	if err := s.userRepo.Update(ctx, user); err != nil {
-		return fmt.Errorf("failed to deactivate user: %w", err)
+	// Check if user exists locally
+	_, err = s.userRepo.GetByEmail(ctx, tenant.ID, email)
+	if err != nil {
+		return nil // Don't reveal if user exists
 	}
 
-	// Create audit log
-	s.createAuditLog(ctx, user.TenantID, deactivatedBy, userID, models.AuditUpdate, "User deactivated")
+	// Send reset email via Supabase
+	if err := s.supabaseAuth.ResetPasswordForEmail(email); err != nil {
+		return fmt.Errorf("failed to send reset email: %w", err)
+	}
 
 	return nil
 }
 
-// ReactivateUser reactivates a user account
-func (s *UserService) ReactivateUser(ctx context.Context, userID, reactivatedBy uuid.UUID) error {
-	user, err := s.userRepo.GetByID(ctx, userID)
+// SyncSupabaseUser syncs a Supabase user with local database
+func (s *UserService) syncSupabaseUser(ctx context.Context, supabaseUser *SupabaseUser, tenantID uuid.UUID) (*models.User, error) {
+	// Check if user exists locally
+	user, err := s.userRepo.GetByID(ctx, supabaseUser.ID)
 	if err != nil {
-		return ErrUserNotFound
+		// User doesn't exist locally, create them
+		user = &models.User{
+			ID:            supabaseUser.ID,
+			TenantID:      tenantID,
+			Email:         supabaseUser.Email,
+			FirstName:     s.getStringFromMetadata(supabaseUser.UserMetadata, "first_name"),
+			LastName:      s.getStringFromMetadata(supabaseUser.UserMetadata, "last_name"),
+			Role:          s.getRoleFromMetadata(supabaseUser.UserMetadata),
+			Department:    s.getStringFromMetadata(supabaseUser.UserMetadata, "department"),
+			JobTitle:      s.getStringFromMetadata(supabaseUser.UserMetadata, "job_title"),
+			IsActive:      true,
+			EmailVerified: supabaseUser.EmailConfirmedAt != nil,
+			LastLoginAt:   supabaseUser.LastSignInAt,
+			Preferences:   models.JSONB{},
+			NotificationSettings: models.JSONB{
+				"email_notifications": true,
+				"task_reminders":      true,
+				"document_alerts":     true,
+			},
+		}
+
+		if err := s.userRepo.Create(ctx, user); err != nil {
+			return nil, fmt.Errorf("failed to create local user: %w", err)
+		}
+	} else {
+		// Update existing user with Supabase data
+		user.Email = supabaseUser.Email
+		user.EmailVerified = supabaseUser.EmailConfirmedAt != nil
+		user.LastLoginAt = supabaseUser.LastSignInAt
+
+		if err := s.userRepo.Update(ctx, user); err != nil {
+			return nil, fmt.Errorf("failed to update local user: %w", err)
+		}
 	}
 
-	user.IsActive = true
-	user.UpdatedAt = time.Now()
-
-	if err := s.userRepo.Update(ctx, user); err != nil {
-		return fmt.Errorf("failed to reactivate user: %w", err)
-	}
-
-	// Create audit log
-	s.createAuditLog(ctx, user.TenantID, reactivatedBy, userID, models.AuditUpdate, "User reactivated")
-
-	return nil
+	return user, nil
 }
 
 // ListUsers lists users for a tenant with filtering and pagination
@@ -491,35 +534,52 @@ func (s *UserService) CheckPermission(ctx context.Context, userID uuid.UUID, per
 	return false, nil
 }
 
-// ResetPassword initiates password reset process
-func (s *UserService) ResetPassword(ctx context.Context, tenantSubdomain, email string) error {
-	// Get tenant
-	tenant, err := s.tenantRepo.GetBySubdomain(ctx, tenantSubdomain)
+// DeactivateUser deactivates a user account
+func (s *UserService) DeactivateUser(ctx context.Context, userID, deactivatedBy uuid.UUID) error {
+	user, err := s.userRepo.GetByID(ctx, userID)
 	if err != nil {
-		return ErrUserNotFound // Don't reveal if tenant exists
+		return ErrUserNotFound
 	}
 
-	// Get user
-	user, err := s.userRepo.GetByEmail(ctx, tenant.ID, email)
-	if err != nil {
-		return nil // Don't reveal if user exists
+	user.IsActive = false
+	user.UpdatedAt = time.Now()
+
+	if err := s.userRepo.Update(ctx, user); err != nil {
+		return fmt.Errorf("failed to deactivate user: %w", err)
 	}
 
-	// Generate reset token
-	resetToken, err := s.authService.GeneratePasswordResetToken(user.ID)
-	if err != nil {
-		return fmt.Errorf("failed to generate reset token: %w", err)
-	}
-
-	// Send reset email
-	if s.emailService != nil {
-		if err := s.emailService.SendPasswordReset(ctx, user.Email, resetToken); err != nil {
-			return fmt.Errorf("failed to send reset email: %w", err)
-		}
-	}
+	// Also disable in Supabase (admin operation)
+	s.supabaseAuth.AdminUpdateUser(userID.String(), map[string]interface{}{
+		"user_disabled": true,
+	})
 
 	// Create audit log
-	s.createAuditLog(ctx, tenant.ID, user.ID, user.ID, models.AuditUpdate, "Password reset requested")
+	s.createAuditLog(ctx, user.TenantID, deactivatedBy, userID, models.AuditUpdate, "User deactivated")
+
+	return nil
+}
+
+// ReactivateUser reactivates a user account
+func (s *UserService) ReactivateUser(ctx context.Context, userID, reactivatedBy uuid.UUID) error {
+	user, err := s.userRepo.GetByID(ctx, userID)
+	if err != nil {
+		return ErrUserNotFound
+	}
+
+	user.IsActive = true
+	user.UpdatedAt = time.Now()
+
+	if err := s.userRepo.Update(ctx, user); err != nil {
+		return fmt.Errorf("failed to reactivate user: %w", err)
+	}
+
+	// Also enable in Supabase (admin operation)
+	s.supabaseAuth.AdminUpdateUser(userID.String(), map[string]interface{}{
+		"user_disabled": false,
+	})
+
+	// Create audit log
+	s.createAuditLog(ctx, user.TenantID, reactivatedBy, userID, models.AuditUpdate, "User reactivated")
 
 	return nil
 }
@@ -571,16 +631,6 @@ func (s *UserService) isValidRole(role models.UserRole) bool {
 		}
 	}
 	return false
-}
-
-func (s *UserService) hashPassword(password string) (string, error) {
-	bytes, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
-	return string(bytes), err
-}
-
-func (s *UserService) verifyPassword(password, hash string) bool {
-	err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
-	return err == nil
 }
 
 func (s *UserService) generateMFASecret() (string, error) {
@@ -637,15 +687,33 @@ func (s *UserService) getRolePermissions(role models.UserRole) []string {
 	}
 }
 
-func (s *UserService) sendEmailVerification(ctx context.Context, user *models.User) error {
-	// Generate verification token
-	token, err := s.authService.GenerateEmailVerificationToken(user.ID)
-	if err != nil {
-		return err
+func (s *UserService) getStringFromMetadata(metadata map[string]interface{}, key string) string {
+	if val, ok := metadata[key]; ok {
+		if str, ok := val.(string); ok {
+			return str
+		}
 	}
+	return ""
+}
 
-	// Send verification email
-	return s.emailService.SendEmailVerification(ctx, user.Email, token)
+func (s *UserService) getRoleFromMetadata(metadata map[string]interface{}) models.UserRole {
+	roleStr := s.getStringFromMetadata(metadata, "role")
+	switch roleStr {
+	case string(models.UserRoleAdmin):
+		return models.UserRoleAdmin
+	case string(models.UserRoleManager):
+		return models.UserRoleManager
+	case string(models.UserRoleUser):
+		return models.UserRoleUser
+	case string(models.UserRoleViewer):
+		return models.UserRoleViewer
+	case string(models.UserRoleAccountant):
+		return models.UserRoleAccountant
+	case string(models.UserRoleCompliance):
+		return models.UserRoleCompliance
+	default:
+		return models.UserRoleUser
+	}
 }
 
 func (s *UserService) createAuditLog(ctx context.Context, tenantID, userID, resourceID uuid.UUID, action models.AuditAction, details string) {
@@ -663,27 +731,5 @@ func (s *UserService) createAuditLog(ctx context.Context, tenantID, userID, reso
 	}()
 }
 
-// External service interfaces
-
-type AuthService interface {
-	GenerateToken(userID, tenantID uuid.UUID, role models.UserRole) (string, time.Time, error)
-	GenerateRefreshToken(userID uuid.UUID) (string, error)
-	GeneratePasswordResetToken(userID uuid.UUID) (string, error)
-	GenerateEmailVerificationToken(userID uuid.UUID) (string, error)
-	ValidateToken(token string) (*TokenClaims, error)
-	RefreshToken(refreshToken string) (string, time.Time, error)
-}
-
-type TokenClaims struct {
-	UserID    uuid.UUID       `json:"user_id"`
-	TenantID  uuid.UUID       `json:"tenant_id"`
-	Role      models.UserRole `json:"role"`
-	IssuedAt  time.Time       `json:"issued_at"`
-	ExpiresAt time.Time       `json:"expires_at"`
-}
-
-type EmailService interface {
-	SendEmailVerification(ctx context.Context, email, token string) error
-	SendPasswordReset(ctx context.Context, email, token string) error
-	SendWelcomeEmail(ctx context.Context, email, name string) error
-}
+// External service interfaces are now defined in external_interfaces.go
+// This avoids duplication and centralizes interface definitions

@@ -11,12 +11,13 @@ import (
 
 // External service interfaces that our domain services depend on
 
-// StorageService interface for file storage operations
+// StorageService interface for file storage operations (Supabase Storage compatible)
 type StorageService interface {
 	Store(ctx context.Context, params StorageParams) (string, error)
 	Get(ctx context.Context, path string) (io.ReadCloser, error)
 	Delete(ctx context.Context, path string) error
 	GeneratePresignedURL(ctx context.Context, path string, expiry time.Duration) (string, error)
+	GetPublicURL(bucketName, filePath string) string
 }
 
 // StorageParams contains parameters for storing files
@@ -26,6 +27,7 @@ type StorageParams struct {
 	Filename    string
 	ContentType string
 	Size        int64
+	BucketName  string // Supabase bucket name
 }
 
 // AIService interface for AI/ML operations
@@ -40,25 +42,6 @@ type AIService interface {
 	PerformOCR(ctx context.Context, filePath string) (string, error)
 }
 
-// AuthService interface for authentication operations
-type AuthService interface {
-	GenerateToken(userID, tenantID uuid.UUID, role models.UserRole) (string, time.Time, error)
-	GenerateRefreshToken(userID uuid.UUID) (string, error)
-	GeneratePasswordResetToken(userID uuid.UUID) (string, error)
-	GenerateEmailVerificationToken(userID uuid.UUID) (string, error)
-	ValidateToken(token string) (*TokenClaims, error)
-	RefreshToken(refreshToken string) (string, time.Time, error)
-}
-
-// TokenClaims represents JWT token claims
-type TokenClaims struct {
-	UserID    uuid.UUID       `json:"user_id"`
-	TenantID  uuid.UUID       `json:"tenant_id"`
-	Role      models.UserRole `json:"role"`
-	IssuedAt  time.Time       `json:"issued_at"`
-	ExpiresAt time.Time       `json:"expires_at"`
-}
-
 // EmailService interface for email operations
 type EmailService interface {
 	SendEmailVerification(ctx context.Context, email, token string) error
@@ -66,18 +49,59 @@ type EmailService interface {
 	SendWelcomeEmail(ctx context.Context, email, name string) error
 }
 
-// NotificationService interface for sending notifications
-type NotificationService interface {
-	SendTaskAssignment(ctx context.Context, task *models.WorkflowTask, userID uuid.UUID) error
-	SendTaskCompletion(ctx context.Context, task *models.WorkflowTask, completedBy uuid.UUID, action string) error
-	SendTaskReminder(ctx context.Context, task *models.WorkflowTask) error
-	SendTaskEscalation(ctx context.Context, task *models.WorkflowTask, escalatedTo uuid.UUID) error
+// SupabaseAuthService interface for Supabase authentication operations
+type SupabaseAuthService interface {
+	// User management
+	SignUpWithEmail(email, password string, metadata map[string]interface{}) (*SupabaseUser, error)
+	SignInWithEmail(email, password string) (*SupabaseAuthResponse, error)
+	SignOut(accessToken string) error
+
+	// Token management
+	ValidateToken(accessToken string) (*SupabaseUser, error)
+	RefreshSession(refreshToken string) (*SupabaseAuthResponse, error)
+
+	// Password management
+	ResetPasswordForEmail(email string) error
+	UpdatePassword(accessToken, newPassword string) error
+
+	// User profile
+	GetUser(accessToken string) (*SupabaseUser, error)
+	UpdateUser(accessToken string, updates map[string]interface{}) (*SupabaseUser, error)
+
+	// Admin operations (using service key)
+	AdminGetUser(userID string) (*SupabaseUser, error)
+	AdminUpdateUser(userID string, updates map[string]interface{}) (*SupabaseUser, error)
+	AdminDeleteUser(userID string) error
 }
 
-// SubscriptionService interface for subscription management
-type SubscriptionService interface {
-	InitializeSubscription(ctx context.Context, tenantID uuid.UUID, tier models.SubscriptionTier) error
-	UpgradeSubscription(ctx context.Context, tenantID uuid.UUID, newTier models.SubscriptionTier) error
-	CancelSubscription(ctx context.Context, tenantID uuid.UUID) error
-	GetSubscriptionStatus(ctx context.Context, tenantID uuid.UUID) (string, error)
+// SupabaseUser represents a user from Supabase Auth
+type SupabaseUser struct {
+	ID               uuid.UUID              `json:"id"`
+	Email            string                 `json:"email"`
+	EmailConfirmedAt *time.Time             `json:"email_confirmed_at"`
+	Phone            string                 `json:"phone,omitempty"`
+	PhoneConfirmedAt *time.Time             `json:"phone_confirmed_at,omitempty"`
+	UserMetadata     map[string]interface{} `json:"user_metadata"`
+	AppMetadata      map[string]interface{} `json:"app_metadata"`
+	CreatedAt        time.Time              `json:"created_at"`
+	UpdatedAt        time.Time              `json:"updated_at"`
+	LastSignInAt     *time.Time             `json:"last_sign_in_at"`
+}
+
+// SupabaseAuthResponse represents Supabase auth response
+type SupabaseAuthResponse struct {
+	User         *SupabaseUser `json:"user"`
+	Session      *Session      `json:"session"`
+	AccessToken  string        `json:"access_token"`
+	RefreshToken string        `json:"refresh_token"`
+	ExpiresAt    time.Time     `json:"expires_at"`
+}
+
+// Session represents a Supabase session
+type Session struct {
+	AccessToken  string        `json:"access_token"`
+	RefreshToken string        `json:"refresh_token"`
+	ExpiresAt    time.Time     `json:"expires_at"`
+	TokenType    string        `json:"token_type"`
+	User         *SupabaseUser `json:"user"`
 }

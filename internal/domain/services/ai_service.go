@@ -651,16 +651,4 @@ type OCRService interface {
 	GetConfidence(ctx context.Context, imagePath string) (float64, error)
 }
 
-type StorageService interface {
-	Get(ctx context.Context, path string) (io.ReadCloser, error)
-	Store(ctx context.Context, params StorageParams) (string, error)
-	Delete(ctx context.Context, path string) error
-}
-
-type StorageParams struct {
-	TenantID    uuid.UUID
-	FileReader  io.Reader
-	Filename    string
-	ContentType string
-	Size        int64
-}
+// External service interfaces are now defined in external_interfaces.go

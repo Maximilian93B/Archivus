@@ -92,3 +92,14 @@ db-reset-dev: ## Reset development database
 	dropdb archivus_test || true
 	make db-setup-dev
 	make migrate-up
+
+# Supabase commands
+verify-supabase: ## Verify Supabase connection and setup
+	go run scripts/verify-supabase.go
+
+setup-supabase: ## Setup environment for Supabase deployment
+	cp env.supabase.example .env
+	@echo "Please edit .env with your Supabase credentials from:"
+	@echo "https://supabase.com/dashboard → Your Project → Settings → Database"
+	@echo ""
+	@echo "Then run: make verify-supabase"
