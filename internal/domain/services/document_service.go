@@ -21,7 +21,6 @@ var (
 	ErrDocumentNotFound    = errors.New("document not found")
 	ErrDocumentExists      = errors.New("document already exists")
 	ErrInvalidDocumentType = errors.New("invalid document type")
-	ErrQuotaExceeded       = errors.New("storage quota exceeded")
 	ErrProcessingFailed    = errors.New("document processing failed")
 	ErrUnauthorizedAccess  = errors.New("unauthorized access to document")
 	ErrDocumentTooLarge    = errors.New("document exceeds maximum size limit")
@@ -293,6 +292,11 @@ func (s *DocumentService) GetDocument(ctx context.Context, documentID, tenantID,
 	s.createAuditLog(ctx, tenantID, userID, documentID, models.AuditRead, "Document viewed")
 
 	return document, nil
+}
+
+// ListDocuments lists documents with filtering and pagination
+func (s *DocumentService) ListDocuments(ctx context.Context, tenantID uuid.UUID, filters repositories.DocumentFilters) ([]models.Document, int64, error) {
+	return s.docRepo.List(ctx, tenantID, filters)
 }
 
 // SearchDocuments performs intelligent document search

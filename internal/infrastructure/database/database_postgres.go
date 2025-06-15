@@ -1,14 +1,12 @@
-//go:build !postgres
+//go:build postgres
 
 package database
 
 import (
 	"fmt"
-	"strings"
 	"time"
 
 	"gorm.io/driver/postgres"
-	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
@@ -17,7 +15,7 @@ type DB struct {
 	*gorm.DB
 }
 
-// New creates a new database connection
+// New creates a new database connection (PostgreSQL only)
 func New(databaseURL string) (*DB, error) {
 	// Configure GORM
 	config := &gorm.Config{
@@ -28,38 +26,26 @@ func New(databaseURL string) (*DB, error) {
 		Logger: logger.Default.LogMode(logger.Info),
 	}
 
-	var db *gorm.DB
-	var err error
-
-	// Check if it's SQLite for testing
-	if strings.HasPrefix(databaseURL, "file:") || strings.HasSuffix(databaseURL, ".db") {
-		// SQLite connection for testing
-		db, err = gorm.Open(sqlite.Open(databaseURL), config)
-	} else {
-		// PostgreSQL connection
-		db, err = gorm.Open(postgres.Open(databaseURL), config)
-	}
-
+	// Use PostgreSQL connection only
+	db, err := gorm.Open(postgres.Open(databaseURL), config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to database: %w", err)
 	}
 
-	// Configure connection pool (only for PostgreSQL)
-	if !strings.HasPrefix(databaseURL, "file:") && !strings.HasSuffix(databaseURL, ".db") {
-		sqlDB, err := db.DB()
-		if err != nil {
-			return nil, fmt.Errorf("failed to get underlying sql.DB: %w", err)
-		}
+	// Configure connection pool
+	sqlDB, err := db.DB()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get underlying sql.DB: %w", err)
+	}
 
-		// Set connection pool settings
-		sqlDB.SetMaxIdleConns(10)
-		sqlDB.SetMaxOpenConns(100)
-		sqlDB.SetConnMaxLifetime(time.Hour)
+	// Set connection pool settings
+	sqlDB.SetMaxIdleConns(10)
+	sqlDB.SetMaxOpenConns(100)
+	sqlDB.SetConnMaxLifetime(time.Hour)
 
-		// Enable required PostgreSQL extensions (only for PostgreSQL)
-		if err := enableExtensions(db); err != nil {
-			return nil, fmt.Errorf("failed to enable extensions: %w", err)
-		}
+	// Enable required PostgreSQL extensions
+	if err := enableExtensions(db); err != nil {
+		return nil, fmt.Errorf("failed to enable extensions: %w", err)
 	}
 
 	return &DB{DB: db}, nil

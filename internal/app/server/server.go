@@ -50,7 +50,7 @@ func NewServer(
 
 	// Create handlers
 	handlers := &Handlers{
-		AuthHandler:     handlers.NewAuthHandler(services.UserService, services.TenantService),
+		AuthHandler:     handlers.NewAuthHandler(services.UserService, services.TenantService, nil),
 		DocumentHandler: handlers.NewDocumentHandler(services.DocumentService, services.UserService),
 	}
 
@@ -115,7 +115,7 @@ func (s *Server) setupRoutes() {
 	v1 := s.router.Group("/api/v1")
 	{
 		// Register handler routes
-		s.handlers.AuthHandler.RegisterRoutes(v1)
+		s.handlers.AuthHandler.SetupRoutes(v1)
 		s.handlers.DocumentHandler.RegisterRoutes(v1)
 
 		// Add other handler routes as they're created

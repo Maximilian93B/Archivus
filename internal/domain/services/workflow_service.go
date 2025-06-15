@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -133,13 +134,24 @@ func (s *WorkflowService) CreateWorkflow(ctx context.Context, params CreateWorkf
 		return nil, fmt.Errorf("invalid workflow rules: %w", err)
 	}
 
+	// Marshal rules to JSON then to map for JSONB
+	rulesJSON, err := json.Marshal(params.Rules)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal workflow rules: %w", err)
+	}
+
+	var rulesMap models.JSONB
+	if err := json.Unmarshal(rulesJSON, &rulesMap); err != nil {
+		return nil, fmt.Errorf("failed to convert workflow rules to JSONB: %w", err)
+	}
+
 	workflow := &models.Workflow{
 		ID:          uuid.New(),
 		TenantID:    params.TenantID,
 		Name:        params.Name,
 		Description: params.Description,
 		DocType:     params.DocumentType,
-		Rules:       models.JSONB(params.Rules),
+		Rules:       rulesMap,
 		IsActive:    params.IsActive,
 		CreatedBy:   params.CreatedBy,
 	}

@@ -8,23 +8,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/archivus/archivus/internal/domain/dto"
 	"github.com/archivus/archivus/internal/infrastructure/database/models"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
-
-// ErrorResponse represents a standard error response
-type ErrorResponse struct {
-	Error   string `json:"error"`
-	Message string `json:"message"`
-	Details string `json:"details,omitempty"`
-}
-
-// SuccessResponse represents a standard success response
-type SuccessResponse struct {
-	Message string      `json:"message"`
-	Data    interface{} `json:"data,omitempty"`
-}
 
 // UserContext represents the authenticated user context
 type UserContext struct {
@@ -237,13 +225,13 @@ func parseDateRange(c *gin.Context, fromParam, toParam string) (from, to *time.T
 
 // SendError sends a structured error response
 func SendError(c *gin.Context, statusCode int, error, message string, details ...string) {
-	response := ErrorResponse{
-		Error:   error,
-		Message: message,
+	response := dto.ErrorResponse{
+		Error: error,
+		Code:  message,
 	}
 
 	if len(details) > 0 {
-		response.Details = details[0]
+		response.Details = map[string]interface{}{"details": details[0]}
 	}
 
 	c.JSON(statusCode, response)
@@ -251,7 +239,7 @@ func SendError(c *gin.Context, statusCode int, error, message string, details ..
 
 // SendSuccess sends a structured success response
 func SendSuccess(c *gin.Context, statusCode int, message string, data interface{}) {
-	response := SuccessResponse{
+	response := dto.SuccessResponse{
 		Message: message,
 		Data:    data,
 	}

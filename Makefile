@@ -103,3 +103,104 @@ setup-supabase: ## Setup environment for Supabase deployment
 	@echo "https://supabase.com/dashboard → Your Project → Settings → Database"
 	@echo ""
 	@echo "Then run: make verify-supabase"
+
+# Go parameters
+GOCMD=go
+GOBUILD=$(GOCMD) build
+GOCLEAN=$(GOCMD) clean
+GOTEST=$(GOCMD) test
+GOGET=$(GOCMD) get
+GOMOD=$(GOCMD) mod
+
+# Project variables
+BINARY_NAME=archivus
+BINARY_UNIX=$(BINARY_NAME)_unix
+SERVER_MAIN=./cmd/server
+MIGRATE_MAIN=./cmd/migrate
+
+.PHONY: all build clean test coverage deps run-server run-migrate-up run-migrate-down run-migrate-reset db-test
+
+all: test build
+
+build:
+	$(GOBUILD) -o $(BINARY_NAME) -v $(SERVER_MAIN)
+
+build-linux:
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GOBUILD) -o $(BINARY_UNIX) -v $(SERVER_MAIN)
+
+clean:
+	$(GOCLEAN)
+	rm -f $(BINARY_NAME)
+	rm -f $(BINARY_UNIX)
+
+# Run tests
+test:
+	$(GOTEST) -v ./...
+
+# Run tests with coverage
+test-coverage:
+	$(GOTEST) -v -coverprofile=coverage.out ./...
+	$(GOCMD) tool cover -html=coverage.out -o coverage.html
+
+# Run repository tests only
+test-repos:
+	$(GOTEST) -v ./internal/infrastructure/repositories/postgresql/...
+
+# Run integration tests
+test-integration:
+	$(GOTEST) -v ./test/integration/...
+
+# Install dependencies
+deps:
+	$(GOMOD) download
+	$(GOMOD) tidy
+	$(GOGET) github.com/nedpals/supabase-go
+
+# Development commands
+run-server:
+	$(GOCMD) run $(SERVER_MAIN)/main.go
+
+run-migrate-up:
+	$(GOCMD) run $(MIGRATE_MAIN)/main.go up
+
+run-migrate-down:
+	$(GOCMD) run $(MIGRATE_MAIN)/main.go down
+
+run-migrate-reset:
+	$(GOCMD) run $(MIGRATE_MAIN)/main.go reset
+
+run-migrate-seed:
+	$(GOCMD) run $(MIGRATE_MAIN)/main.go seed
+
+run-migrate-status:
+	$(GOCMD) run $(MIGRATE_MAIN)/main.go status
+
+# Database setup for testing
+db-test-setup:
+	@echo "Setting up test database..."
+	@echo "Make sure you have DATABASE_URL_TEST configured in your .env file"
+
+# Docker commands
+docker-build:
+	docker build -t archivus:latest .
+
+docker-run:
+	docker-compose up -d
+
+docker-stop:
+	docker-compose down
+
+docker-logs:
+	docker-compose logs -f
+
+# Development helpers
+dev-setup: deps run-migrate-up run-migrate-seed
+	@echo "Development environment setup complete!"
+
+dev-test: test-repos test-integration
+	@echo "All tests passed!"
+
+# Clean everything
+clean-all: clean
+	docker-compose down -v
+	rm -f coverage.out coverage.html

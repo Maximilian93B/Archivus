@@ -1,0 +1,29 @@
+FROM golang:1.21-alpine
+
+# Install build dependencies including CGO support
+RUN apk add --no-cache \
+    git \
+    ca-certificates \
+    tzdata \
+    gcc \
+    musl-dev \
+    sqlite-dev
+
+# Set working directory
+WORKDIR /app
+
+# Copy go mod files first for better caching
+COPY go.mod go.sum ./
+
+# Download dependencies
+RUN go mod download
+
+# Copy the rest of the source code
+COPY . .
+
+# Set environment variables for testing
+ENV CGO_ENABLED=1
+ENV GOOS=linux
+
+# Default command (can be overridden in docker-compose)
+CMD ["go", "test", "-v", "./..."] 

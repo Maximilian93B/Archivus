@@ -17,6 +17,7 @@ type Config struct {
 	Redis       RedisConfig
 	JWT         JWTConfig
 	Storage     StorageConfig
+	Supabase    SupabaseConfig
 	AI          AIConfig
 	Features    FeatureConfig
 	Limits      LimitsConfig
@@ -49,6 +50,14 @@ type StorageConfig struct {
 	S3Region  string
 	AccessKey string
 	SecretKey string
+}
+
+type SupabaseConfig struct {
+	URL        string
+	APIKey     string
+	ServiceKey string
+	Bucket     string
+	JWTSecret  string
 }
 
 type AIConfig struct {
@@ -116,6 +125,13 @@ func Load() (*Config, error) {
 			S3Region:  getEnv("S3_REGION", "us-west-2"),
 			AccessKey: getEnv("AWS_ACCESS_KEY_ID", ""),
 			SecretKey: getEnv("AWS_SECRET_ACCESS_KEY", ""),
+		},
+		Supabase: SupabaseConfig{
+			URL:        getEnv("SUPABASE_URL", ""),
+			APIKey:     getEnv("SUPABASE_API_KEY", ""),
+			ServiceKey: getEnv("SUPABASE_SERVICE_KEY", ""),
+			Bucket:     getEnv("SUPABASE_BUCKET", ""),
+			JWTSecret:  getEnv("SUPABASE_JWT_SECRET", ""),
 		},
 		AI: AIConfig{
 			OpenAI: OpenAIConfig{

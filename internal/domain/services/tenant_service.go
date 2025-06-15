@@ -188,13 +188,13 @@ func (s *TenantService) GetTenant(ctx context.Context, tenantID uuid.UUID) (*Ten
 	}
 
 	// Get user count
-	users, userCount, err := s.userRepo.ListByTenant(ctx, tenantID, repositories.ListParams{PageSize: 1})
+	_, userCount, err := s.userRepo.ListByTenant(ctx, tenantID, repositories.ListParams{PageSize: 1})
 	if err != nil {
 		userCount = 0
 	}
 
 	// Get document count
-	documents, docCount, err := s.documentRepo.List(ctx, tenantID, repositories.DocumentFilters{
+	_, docCount, err := s.documentRepo.List(ctx, tenantID, repositories.DocumentFilters{
 		ListParams: repositories.ListParams{PageSize: 1},
 	})
 	if err != nil {
@@ -221,6 +221,15 @@ func (s *TenantService) GetTenant(ctx context.Context, tenantID uuid.UUID) (*Ten
 		SubscriptionStatus: subscriptionStatus,
 		DaysUntilExpiry:    daysUntilExpiry,
 	}, nil
+}
+
+// GetTenantBySubdomain retrieves tenant by subdomain
+func (s *TenantService) GetTenantBySubdomain(ctx context.Context, subdomain string) (*models.Tenant, error) {
+	tenant, err := s.tenantRepo.GetBySubdomain(ctx, subdomain)
+	if err != nil {
+		return nil, ErrTenantNotFound
+	}
+	return tenant, nil
 }
 
 // UpdateTenant updates tenant information
@@ -363,7 +372,7 @@ func (s *TenantService) ReactivateTenant(ctx context.Context, tenantID uuid.UUID
 
 // GetTenantUsage gets detailed usage statistics
 func (s *TenantService) GetTenantUsage(ctx context.Context, tenantID uuid.UUID) (*TenantUsage, error) {
-	tenant, err := s.tenantRepo.GetByID(ctx, tenantID)
+	_, err := s.tenantRepo.GetByID(ctx, tenantID)
 	if err != nil {
 		return nil, ErrTenantNotFound
 	}
@@ -601,7 +610,7 @@ func (s *TenantService) createAdminUser(ctx context.Context, tenantID uuid.UUID,
 
 func (s *TenantService) setupDefaultFolders(ctx context.Context, tenantID uuid.UUID) error {
 	// Create default folder structure for SMB
-	defaultFolders := []string{
+	_ = []string{
 		"Invoices",
 		"Receipts",
 		"Contracts",
