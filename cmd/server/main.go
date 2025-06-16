@@ -1,10 +1,14 @@
 package main
 
 import (
+	"fmt"
 	"os"
 
 	"github.com/archivus/archivus/internal/app/config"
 	"github.com/archivus/archivus/internal/app/server"
+	"github.com/archivus/archivus/internal/infrastructure/database"
+	"github.com/archivus/archivus/internal/infrastructure/database/models"
+	"github.com/archivus/archivus/internal/infrastructure/repositories/postgresql"
 	"github.com/archivus/archivus/pkg/logger"
 )
 
@@ -21,26 +25,32 @@ func main() {
 
 	log.Info("Starting Archivus DMS", "environment", cfg.Environment, "port", cfg.Server.Port)
 
-	// TODO: Initialize database and repositories
-	// This would be done in a future iteration
-	// db, err := database.New(cfg.GetDatabaseURL())
-	// repos := initializeRepositories(db)
+	// Initialize database and repositories
+	db, err := initializeDatabase(cfg, log)
+	if err != nil {
+		log.Error("Failed to initialize database", "error", err)
+		os.Exit(1)
+	}
+	defer db.Close()
 
-	// TODO: Initialize external services (storage, AI, email, etc.)
-	// This would be done when implementing infrastructure layer
-	// storageService := initializeStorageService(cfg)
-	// aiService := initializeAIService(cfg)
+	repos := initializeRepositories(db, log)
+	log.Info("Database and repositories initialized successfully", "repository_count", 13)
 
-	// TODO: Initialize business services with real dependencies
-	// For now, we'll create placeholder services
+	// Verify repositories are properly initialized
+	if repos == nil {
+		log.Error("Failed to initialize repositories")
+		os.Exit(1)
+	}
+
+	// For Phase 1, create basic services structure
+	// Full service wiring will be completed in Phase 2
 	services := &server.Services{
-		// These would be initialized with real dependencies
-		UserService:      nil, // services.NewUserService(repos.UserRepo, ...)
-		TenantService:    nil, // services.NewTenantService(repos.TenantRepo, ...)
-		DocumentService:  nil, // services.NewDocumentService(repos.DocumentRepo, ...)
-		WorkflowService:  nil, // services.NewWorkflowService(repos.WorkflowRepo, ...)
-		AIService:        nil, // services.NewAIService(repos.AIJobRepo, ...)
-		AnalyticsService: nil, // services.NewAnalyticsService(repos.AnalyticsRepo, ...)
+		UserService:      nil, // To be implemented in Phase 2
+		TenantService:    nil, // To be implemented in Phase 2
+		DocumentService:  nil, // To be implemented in Phase 2
+		WorkflowService:  nil, // To be implemented in Phase 2
+		AIService:        nil, // To be implemented in Phase 3
+		AnalyticsService: nil, // To be implemented in Phase 4
 	}
 
 	// Create HTTP server
@@ -72,32 +82,58 @@ func main() {
 	}
 }
 
-// TODO: These initialization functions would be implemented when we have the infrastructure layer
+// Database initialization function
+func initializeDatabase(cfg *config.Config, log *logger.Logger) (*database.DB, error) {
+	databaseURL := cfg.GetDatabaseURL()
+	if databaseURL == "" && cfg.IsDevelopment() {
+		// Use SQLite for development if no PostgreSQL URL provided
+		databaseURL = "file:./archivus.db?cache=shared&_fk=1"
+		log.Info("Using SQLite database for development", "path", "./archivus.db")
+	}
 
-// func initializeRepositories(db *database.DB) *repositories.Repositories {
-//     return &repositories.Repositories{
-//         UserRepo:     postgresql.NewUserRepository(db),
-//         TenantRepo:   postgresql.NewTenantRepository(db),
-//         DocumentRepo: postgresql.NewDocumentRepository(db),
-//         // ... other repos
-//     }
-// }
+	if databaseURL == "" {
+		return nil, fmt.Errorf("database URL is required")
+	}
 
-// func initializeStorageService(cfg *config.Config) services.StorageService {
-//     switch cfg.Storage.Type {
-//     case "s3":
-//         return s3.NewStorageService(cfg.Storage)
-//     case "local":
-//         return local.NewStorageService(cfg.Storage.Path)
-//     default:
-//         return local.NewStorageService("./uploads")
-//     }
-// }
+	log.Info("Connecting to database", "url", databaseURL)
+	db, err := database.New(databaseURL)
+	if err != nil {
+		return nil, err
+	}
 
-// func initializeAIService(cfg *config.Config) services.AIService {
-//     if !cfg.AI.Enabled {
-//         return &services.NoOpAIService{}
-//     }
-//
-//     return openai.NewAIService(cfg.AI.OpenAI)
-// }
+	// Test the connection
+	if err := db.Ping(); err != nil {
+		return nil, fmt.Errorf("failed to ping database: %w", err)
+	}
+
+	// Run auto-migrations
+	log.Info("Running database migrations...")
+	if err := db.AutoMigrate(models.GetAllModels()...); err != nil {
+		return nil, fmt.Errorf("failed to run migrations: %w", err)
+	}
+
+	log.Info("Database initialized successfully")
+	return db, nil
+}
+
+// Repository initialization function
+func initializeRepositories(db *database.DB, log *logger.Logger) *postgresql.Repositories {
+	log.Info("Initializing all 13 repositories...")
+	repos := postgresql.NewRepositories(db)
+	log.Info("All repositories initialized successfully",
+		"tenant", repos.TenantRepo != nil,
+		"user", repos.UserRepo != nil,
+		"document", repos.DocumentRepo != nil,
+		"folder", repos.FolderRepo != nil,
+		"tag", repos.TagRepo != nil,
+		"category", repos.CategoryRepo != nil,
+		"workflow", repos.WorkflowRepo != nil,
+		"workflow_task", repos.WorkflowTaskRepo != nil,
+		"ai_job", repos.AIJobRepo != nil,
+		"audit", repos.AuditRepo != nil,
+		"share", repos.ShareRepo != nil,
+		"analytics", repos.AnalyticsRepo != nil,
+		"notification", repos.NotificationRepo != nil,
+	)
+	return repos
+}
