@@ -297,5 +297,6 @@ func initializeBusinessServices(
 		WorkflowService:  workflowService,
 		AIService:        nil, // Will be implemented in Phase 3
 		AnalyticsService: analyticsService,
+		AuthService:      authService, // Fixed: Pass the auth service
 	}
 }

@@ -1,13 +1,13 @@
-FROM golang:1.21-alpine
+FROM golang:1.23
 
-# Install build dependencies including CGO support
-RUN apk add --no-cache \
-    git \
-    ca-certificates \
-    tzdata \
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
     gcc \
-    musl-dev \
-    sqlite-dev
+    libc6-dev \
+    sqlite3 \
+    libsqlite3-dev \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
 WORKDIR /app

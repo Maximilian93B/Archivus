@@ -41,6 +41,12 @@ services:
         echo '✅ Database URL: postgres://postgres:postgres@postgres-test:5432/archivus_test' &&
         go mod download &&
         echo '📦 Dependencies downloaded' &&
+        echo '🔄 Running Database Migrations...' &&
+        go run -tags=postgres cmd/migrate/main.go up &&
+        echo '🌱 Seeding Database with Test Data...' &&
+        go run -tags=postgres cmd/migrate/main.go seed &&
+        echo '📊 Checking Migration Status...' &&
+        go run -tags=postgres cmd/migrate/main.go status &&
         echo '🏃 Running Repository Tests...' &&
         go test -v -tags=postgres ./internal/infrastructure/repositories/postgresql/... &&
         echo '🎯 Running Integration Tests...' &&

@@ -30,10 +30,17 @@ func (r *WorkflowTaskRepository) Create(ctx context.Context, task *models.Workfl
 
 func (r *WorkflowTaskRepository) GetByID(ctx context.Context, id uuid.UUID) (*models.WorkflowTask, error) {
 	var task models.WorkflowTask
+	// Use selective preloading to optimize performance
 	err := r.db.WithContext(ctx).
-		Preload("Workflow").
-		Preload("Document").
-		Preload("Assignee").
+		Preload("Workflow", func(db *gorm.DB) *gorm.DB {
+			return db.Select("id", "name", "description", "doc_type", "tenant_id")
+		}).
+		Preload("Document", func(db *gorm.DB) *gorm.DB {
+			return db.Select("id", "title", "file_name", "document_type", "status", "tenant_id")
+		}).
+		Preload("Assignee", func(db *gorm.DB) *gorm.DB {
+			return db.Select("id", "first_name", "last_name", "email", "role")
+		}).
 		Where("id = ?", id).First(&task).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -57,9 +64,15 @@ func (r *WorkflowTaskRepository) Update(ctx context.Context, task *models.Workfl
 
 func (r *WorkflowTaskRepository) ListByAssignee(ctx context.Context, userID uuid.UUID, status models.WorkflowStatus) ([]models.WorkflowTask, error) {
 	var tasks []models.WorkflowTask
+	// Use selective preloading and field selection to optimize performance
 	query := r.db.WithContext(ctx).
-		Preload("Workflow").
-		Preload("Document").
+		Preload("Workflow", func(db *gorm.DB) *gorm.DB {
+			return db.Select("id", "name", "doc_type")
+		}).
+		Preload("Document", func(db *gorm.DB) *gorm.DB {
+			return db.Select("id", "title", "file_name", "document_type", "status")
+		}).
+		Select("id", "workflow_id", "document_id", "assigned_to", "task_type", "status", "priority", "due_date", "comments", "created_at").
 		Where("assigned_to = ?", userID)
 
 	// Filter by status if provided
@@ -76,9 +89,15 @@ func (r *WorkflowTaskRepository) ListByAssignee(ctx context.Context, userID uuid
 
 func (r *WorkflowTaskRepository) ListByDocument(ctx context.Context, documentID uuid.UUID) ([]models.WorkflowTask, error) {
 	var tasks []models.WorkflowTask
+	// Use selective preloading to optimize performance
 	err := r.db.WithContext(ctx).
-		Preload("Workflow").
-		Preload("Assignee").
+		Preload("Workflow", func(db *gorm.DB) *gorm.DB {
+			return db.Select("id", "name", "doc_type")
+		}).
+		Preload("Assignee", func(db *gorm.DB) *gorm.DB {
+			return db.Select("id", "first_name", "last_name", "email", "role")
+		}).
+		Select("id", "workflow_id", "document_id", "assigned_to", "task_type", "status", "priority", "due_date", "comments", "created_at", "completed_at").
 		Where("document_id = ?", documentID).
 		Order("created_at DESC").Find(&tasks).Error
 	if err != nil {
@@ -89,10 +108,18 @@ func (r *WorkflowTaskRepository) ListByDocument(ctx context.Context, documentID 
 
 func (r *WorkflowTaskRepository) GetPendingTasks(ctx context.Context, tenantID uuid.UUID) ([]models.WorkflowTask, error) {
 	var tasks []models.WorkflowTask
+	// Use selective preloading to optimize performance
 	err := r.db.WithContext(ctx).
-		Preload("Workflow").
-		Preload("Document").
-		Preload("Assignee").
+		Preload("Workflow", func(db *gorm.DB) *gorm.DB {
+			return db.Select("id", "name", "doc_type")
+		}).
+		Preload("Document", func(db *gorm.DB) *gorm.DB {
+			return db.Select("id", "title", "file_name", "document_type", "status")
+		}).
+		Preload("Assignee", func(db *gorm.DB) *gorm.DB {
+			return db.Select("id", "first_name", "last_name", "email")
+		}).
+		Select("workflow_tasks.id", "workflow_tasks.workflow_id", "workflow_tasks.document_id", "workflow_tasks.assigned_to", "workflow_tasks.task_type", "workflow_tasks.status", "workflow_tasks.priority", "workflow_tasks.due_date", "workflow_tasks.created_at").
 		Joins("JOIN workflows ON workflow_tasks.workflow_id = workflows.id").
 		Where("workflows.tenant_id = ? AND workflow_tasks.status = ?", tenantID, models.WorkflowPending).
 		Order("workflow_tasks.priority ASC, workflow_tasks.due_date ASC").Find(&tasks).Error
@@ -105,10 +132,18 @@ func (r *WorkflowTaskRepository) GetPendingTasks(ctx context.Context, tenantID u
 func (r *WorkflowTaskRepository) GetOverdueTasks(ctx context.Context, tenantID uuid.UUID) ([]models.WorkflowTask, error) {
 	var tasks []models.WorkflowTask
 	now := time.Now()
+	// Use selective preloading to optimize performance
 	err := r.db.WithContext(ctx).
-		Preload("Workflow").
-		Preload("Document").
-		Preload("Assignee").
+		Preload("Workflow", func(db *gorm.DB) *gorm.DB {
+			return db.Select("id", "name", "doc_type")
+		}).
+		Preload("Document", func(db *gorm.DB) *gorm.DB {
+			return db.Select("id", "title", "file_name", "document_type", "status")
+		}).
+		Preload("Assignee", func(db *gorm.DB) *gorm.DB {
+			return db.Select("id", "first_name", "last_name", "email")
+		}).
+		Select("workflow_tasks.id", "workflow_tasks.workflow_id", "workflow_tasks.document_id", "workflow_tasks.assigned_to", "workflow_tasks.task_type", "workflow_tasks.status", "workflow_tasks.priority", "workflow_tasks.due_date", "workflow_tasks.created_at").
 		Joins("JOIN workflows ON workflow_tasks.workflow_id = workflows.id").
 		Where("workflows.tenant_id = ? AND workflow_tasks.status = ? AND workflow_tasks.due_date < ?",
 			tenantID, models.WorkflowPending, now).

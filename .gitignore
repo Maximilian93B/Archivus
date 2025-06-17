@@ -1,0 +1,190 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+main
+main.exe
+archivus
+archivus.exe
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool, specifically when used with LiteIDE
+*.out
+
+# Dependency directories (remove the comment below to include it)
+# vendor/
+
+# Go workspace file
+go.work
+go.work.sum
+
+# Build directories
+build/
+dist/
+bin/
+
+# Environment files
+.env
+.env.local
+.env.development
+.env.test
+.env.production
+.env.staging
+*.env
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Log files
+*.log
+logs/
+log/
+
+# Temporary files
+tmp/
+temp/
+.tmp/
+
+# IDE and Editor files
+# VS Code
+.vscode/
+*.code-workspace
+
+# JetBrains IDEs (IntelliJ, GoLand, etc.)
+.idea/
+*.iml
+*.iws
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Vim
+*.swp
+*.swo
+*~
+
+# Emacs
+*~
+\#*\#
+/.emacs.desktop
+/.emacs.desktop.lock
+*.elc
+auto-save-list
+tramp
+.\#*
+
+# OS generated files
+# macOS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.cab
+*.msi
+*.msm
+*.msp
+
+# Linux
+*~
+
+# Docker files (keep Dockerfile but ignore runtime files)
+.dockerignore
+
+# Docker volumes and data
+docker-data/
+volumes/
+
+# SSL certificates and keys
+*.pem
+*.key
+*.crt
+*.cert
+*.p12
+
+# Configuration files that might contain secrets
+config/local.*
+config/production.*
+config/staging.*
+
+# Test coverage
+coverage.txt
+coverage.html
+coverage.out
+
+# Profiling
+*.prof
+cpu.prof
+mem.prof
+
+# Air (live reload tool) temporary files
+.air/
+tmp/
+
+# Node.js (if you have any frontend build tools)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Frontend build artifacts
+dist/
+public/build/
+assets/build/
+
+# Archive files
+*.tar
+*.tar.gz
+*.zip
+*.rar
+
+# Backup files
+*.bak
+*.backup
+*.old
+
+# PID files
+*.pid
+
+# Documentation build
+docs/_build/
+
+# Local development tools
+.tool-versions
+.nvmrc
+
+# Terraform (if used for infrastructure)
+*.tfstate
+*.tfstate.*
+.terraform/
+
+# Kubernetes (if used)
+*.kubeconfig
+
+# Local scripts
+scripts/local.*
+local.*
+
+# Data directories
+data/
+uploads/
+storage/local/
+
+# Cache directories
+.cache/
+cache/ 

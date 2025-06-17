@@ -622,8 +622,761 @@ func (s *DocumentService) createAuditLog(ctx context.Context, tenantID, userID, 
 // Keep original method for backwards compatibility
 func (s *DocumentService) calculateContentHash(reader io.Reader) (string, error) {
 	hasher := sha256.New()
-	if _, err := io.Copy(hasher, reader); err != nil {
+	_, err := io.Copy(hasher, reader)
+	if err != nil {
 		return "", err
 	}
 	return fmt.Sprintf("%x", hasher.Sum(nil)), nil
+}
+
+// FOLDER MANAGEMENT METHODS
+
+// CreateFolder creates a new folder with proper business logic
+func (s *DocumentService) CreateFolder(ctx context.Context, tenantID, userID uuid.UUID, name, description string, parentID *uuid.UUID, color, icon string) (*models.Folder, error) {
+	// Validate name
+	if strings.TrimSpace(name) == "" {
+		return nil, fmt.Errorf("folder name cannot be empty")
+	}
+
+	// Build folder path and level
+	path := name
+	level := 0
+
+	if parentID != nil {
+		// Get parent folder and validate it belongs to the same tenant
+		parent, err := s.folderRepo.GetByID(ctx, *parentID)
+		if err != nil {
+			return nil, fmt.Errorf("parent folder not found: %w", err)
+		}
+		if parent.TenantID != tenantID {
+			return nil, fmt.Errorf("parent folder belongs to different tenant")
+		}
+
+		// Check for name conflicts in the same parent
+		if existingFolder, err := s.folderRepo.GetByPath(ctx, tenantID, parent.Path+"/"+name); err == nil && existingFolder != nil {
+			return nil, fmt.Errorf("folder with this name already exists in parent directory")
+		}
+
+		path = parent.Path + "/" + name
+		level = parent.Level + 1
+	} else {
+		// Root folder - check for name conflicts at root level
+		if existingFolder, err := s.folderRepo.GetByPath(ctx, tenantID, "/"+name); err == nil && existingFolder != nil {
+			return nil, fmt.Errorf("folder with this name already exists at root level")
+		}
+		path = "/" + name
+		level = 0
+	}
+
+	// Set defaults
+	if color == "" {
+		color = "#6B7280"
+	}
+	if icon == "" {
+		icon = "folder"
+	}
+
+	// Create folder
+	folder := &models.Folder{
+		ID:          uuid.New(),
+		TenantID:    tenantID,
+		ParentID:    parentID,
+		Name:        name,
+		Description: description,
+		Path:        path,
+		Level:       level,
+		IsSystem:    false,
+		Color:       color,
+		Icon:        icon,
+		CreatedBy:   userID,
+		CreatedAt:   time.Now(),
+		UpdatedAt:   time.Now(),
+	}
+
+	if err := s.folderRepo.Create(ctx, folder); err != nil {
+		return nil, fmt.Errorf("failed to create folder: %w", err)
+	}
+
+	// Create audit log
+	s.createAuditLog(ctx, tenantID, userID, folder.ID, models.AuditCreate, "Folder created: "+name)
+
+	return folder, nil
+}
+
+// GetFolder retrieves a folder with access control
+func (s *DocumentService) GetFolder(ctx context.Context, folderID, tenantID uuid.UUID) (*models.Folder, error) {
+	folder, err := s.folderRepo.GetByID(ctx, folderID)
+	if err != nil {
+		return nil, fmt.Errorf("folder not found")
+	}
+
+	// Verify tenant access
+	if folder.TenantID != tenantID {
+		return nil, fmt.Errorf("unauthorized access to folder")
+	}
+
+	return folder, nil
+}
+
+// GetFolders lists folders with optional parent filtering
+func (s *DocumentService) GetFolders(ctx context.Context, tenantID uuid.UUID, parentID *uuid.UUID) ([]models.Folder, error) {
+	if parentID != nil {
+		// Get children of specific parent
+		return s.folderRepo.GetChildren(ctx, *parentID)
+	}
+
+	// Get all root folders (parentID is null)
+	var folders []models.Folder
+	// This would require a new repository method to get root folders by tenant
+	// For now, we'll use the tree method and extract root folders
+	tree, err := s.folderRepo.GetTree(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, node := range tree {
+		folders = append(folders, *node.Folder)
+	}
+
+	return folders, nil
+}
+
+// UpdateFolder updates an existing folder
+func (s *DocumentService) UpdateFolder(ctx context.Context, folderID, tenantID uuid.UUID, updates map[string]interface{}, userID uuid.UUID) (*models.Folder, error) {
+	// Get existing folder
+	folder, err := s.GetFolder(ctx, folderID, tenantID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Check if it's a system folder
+	if folder.IsSystem {
+		return nil, fmt.Errorf("cannot modify system folder")
+	}
+
+	// Apply updates
+	updated := false
+	if name, ok := updates["name"].(string); ok && strings.TrimSpace(name) != "" {
+		if name != folder.Name {
+			// Check for name conflicts
+			newPath := strings.Replace(folder.Path, "/"+folder.Name, "/"+name, 1)
+			if existingFolder, err := s.folderRepo.GetByPath(ctx, tenantID, newPath); err == nil && existingFolder != nil && existingFolder.ID != folder.ID {
+				return nil, fmt.Errorf("folder with this name already exists")
+			}
+
+			folder.Name = name
+			folder.Path = newPath
+			updated = true
+		}
+	}
+
+	if description, ok := updates["description"].(string); ok {
+		folder.Description = description
+		updated = true
+	}
+
+	if color, ok := updates["color"].(string); ok && color != "" {
+		folder.Color = color
+		updated = true
+	}
+
+	if icon, ok := updates["icon"].(string); ok && icon != "" {
+		folder.Icon = icon
+		updated = true
+	}
+
+	if updated {
+		folder.UpdatedAt = time.Now()
+		if err := s.folderRepo.Update(ctx, folder); err != nil {
+			return nil, fmt.Errorf("failed to update folder: %w", err)
+		}
+
+		// Create audit log
+		s.createAuditLog(ctx, tenantID, userID, folder.ID, models.AuditUpdate, "Folder updated")
+	}
+
+	return folder, nil
+}
+
+// DeleteFolder deletes a folder with validation
+func (s *DocumentService) DeleteFolder(ctx context.Context, folderID, tenantID, userID uuid.UUID) error {
+	// Get folder first to check permissions
+	folder, err := s.GetFolder(ctx, folderID, tenantID)
+	if err != nil {
+		return err
+	}
+
+	// Check if it's a system folder
+	if folder.IsSystem {
+		return fmt.Errorf("cannot delete system folder")
+	}
+
+	// Delete using repository (it handles validation for children and documents)
+	if err := s.folderRepo.Delete(ctx, folderID); err != nil {
+		return err
+	}
+
+	// Create audit log
+	s.createAuditLog(ctx, tenantID, userID, folderID, models.AuditDelete, "Folder deleted: "+folder.Name)
+
+	return nil
+}
+
+// GetFolderTree retrieves the complete folder hierarchy
+func (s *DocumentService) GetFolderTree(ctx context.Context, tenantID uuid.UUID) ([]repositories.FolderNode, error) {
+	tree, err := s.folderRepo.GetTree(ctx, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get folder tree: %w", err)
+	}
+
+	// Populate document counts for each folder
+	for i := range tree {
+		s.populateDocumentCount(ctx, &tree[i])
+	}
+
+	return tree, nil
+}
+
+// MoveFolder moves a folder to a new parent location
+func (s *DocumentService) MoveFolder(ctx context.Context, folderID, newParentID, tenantID, userID uuid.UUID) (*models.Folder, error) {
+	// Get folder to move
+	folder, err := s.GetFolder(ctx, folderID, tenantID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Check if it's a system folder
+	if folder.IsSystem {
+		return nil, fmt.Errorf("cannot move system folder")
+	}
+
+	// Validate new parent exists and belongs to same tenant
+	newParent, err := s.GetFolder(ctx, newParentID, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("new parent folder not found")
+	}
+
+	// Prevent moving folder to itself or its descendant
+	if folderID == newParentID {
+		return nil, fmt.Errorf("cannot move folder to itself")
+	}
+
+	// TODO: Add cycle detection logic here
+	// For now, we'll rely on the repository implementation
+
+	// Use repository move method
+	if err := s.folderRepo.Move(ctx, folderID, newParentID); err != nil {
+		return nil, fmt.Errorf("failed to move folder: %w", err)
+	}
+
+	// Get updated folder
+	updatedFolder, err := s.GetFolder(ctx, folderID, tenantID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Create audit log
+	s.createAuditLog(ctx, tenantID, userID, folderID, models.AuditUpdate,
+		fmt.Sprintf("Folder moved to %s", newParent.Name))
+
+	return updatedFolder, nil
+}
+
+// GetFolderDocuments retrieves documents in a specific folder
+func (s *DocumentService) GetFolderDocuments(ctx context.Context, folderID, tenantID uuid.UUID, filters repositories.DocumentFilters) ([]models.Document, int64, error) {
+	// Verify folder access
+	_, err := s.GetFolder(ctx, folderID, tenantID)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	// Set folder filter and call existing list method
+	filters.FolderID = &folderID
+	return s.docRepo.List(ctx, tenantID, filters)
+}
+
+// GetFolderChildren gets immediate child folders
+func (s *DocumentService) GetFolderChildren(ctx context.Context, folderID uuid.UUID) ([]models.Folder, error) {
+	return s.folderRepo.GetChildren(ctx, folderID)
+}
+
+// Helper method to populate document counts recursively
+func (s *DocumentService) populateDocumentCount(ctx context.Context, node *repositories.FolderNode) {
+	// Get document count for this folder
+	count, err := s.folderRepo.GetDocumentCount(ctx, node.Folder.ID)
+	if err == nil {
+		node.DocumentCount = count
+	}
+
+	// Recursively populate children
+	for i := range node.Children {
+		s.populateDocumentCount(ctx, &node.Children[i])
+	}
+}
+
+// TAG MANAGEMENT METHODS
+
+// CreateTag creates a new tag with validation
+func (s *DocumentService) CreateTag(ctx context.Context, tenantID, userID uuid.UUID, name, color string) (*models.Tag, error) {
+	// Validate name
+	if strings.TrimSpace(name) == "" {
+		return nil, fmt.Errorf("tag name cannot be empty")
+	}
+
+	// Check for duplicate names in tenant
+	if existingTag, err := s.tagRepo.GetByName(ctx, tenantID, name); err == nil && existingTag != nil {
+		return nil, fmt.Errorf("tag with name '%s' already exists", name)
+	}
+
+	// Set defaults
+	if color == "" {
+		color = "#6B7280"
+	}
+
+	// Create tag
+	tag := &models.Tag{
+		ID:            uuid.New(),
+		TenantID:      tenantID,
+		Name:          name,
+		Color:         color,
+		IsAIGenerated: false,
+		UsageCount:    0,
+		CreatedAt:     time.Now(),
+	}
+
+	if err := s.tagRepo.Create(ctx, tag); err != nil {
+		return nil, fmt.Errorf("failed to create tag: %w", err)
+	}
+
+	// Create audit log
+	s.createAuditLog(ctx, tenantID, userID, tag.ID, models.AuditCreate, "Tag created: "+name)
+
+	return tag, nil
+}
+
+// GetTag retrieves a tag with access control
+func (s *DocumentService) GetTag(ctx context.Context, tagID, tenantID uuid.UUID) (*models.Tag, error) {
+	tag, err := s.tagRepo.GetByID(ctx, tagID)
+	if err != nil {
+		return nil, fmt.Errorf("tag not found")
+	}
+
+	// Verify tenant access
+	if tag.TenantID != tenantID {
+		return nil, fmt.Errorf("unauthorized access to tag")
+	}
+
+	return tag, nil
+}
+
+// GetTagByName retrieves a tag by name
+func (s *DocumentService) GetTagByName(ctx context.Context, tenantID uuid.UUID, name string) (*models.Tag, error) {
+	return s.tagRepo.GetByName(ctx, tenantID, name)
+}
+
+// ListTags lists all tags for a tenant
+func (s *DocumentService) ListTags(ctx context.Context, tenantID uuid.UUID) ([]models.Tag, error) {
+	return s.tagRepo.ListByTenant(ctx, tenantID)
+}
+
+// GetPopularTags gets most used tags
+func (s *DocumentService) GetPopularTags(ctx context.Context, tenantID uuid.UUID, limit int) ([]models.Tag, error) {
+	if limit <= 0 {
+		limit = 20 // Default limit
+	}
+	return s.tagRepo.GetPopular(ctx, tenantID, limit)
+}
+
+// UpdateTag updates an existing tag
+func (s *DocumentService) UpdateTag(ctx context.Context, tagID, tenantID uuid.UUID, updates map[string]interface{}, userID uuid.UUID) (*models.Tag, error) {
+	// Get existing tag
+	tag, err := s.GetTag(ctx, tagID, tenantID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Apply updates
+	updated := false
+	if name, ok := updates["name"].(string); ok && strings.TrimSpace(name) != "" {
+		if name != tag.Name {
+			// Check for name conflicts
+			if existingTag, err := s.tagRepo.GetByName(ctx, tenantID, name); err == nil && existingTag != nil && existingTag.ID != tag.ID {
+				return nil, fmt.Errorf("tag with name '%s' already exists", name)
+			}
+			tag.Name = name
+			updated = true
+		}
+	}
+
+	if color, ok := updates["color"].(string); ok && color != "" {
+		tag.Color = color
+		updated = true
+	}
+
+	if updated {
+		if err := s.tagRepo.Update(ctx, tag); err != nil {
+			return nil, fmt.Errorf("failed to update tag: %w", err)
+		}
+
+		// Create audit log
+		s.createAuditLog(ctx, tenantID, userID, tag.ID, models.AuditUpdate, "Tag updated")
+	}
+
+	return tag, nil
+}
+
+// DeleteTag deletes a tag with validation
+func (s *DocumentService) DeleteTag(ctx context.Context, tagID, tenantID, userID uuid.UUID) error {
+	// Get tag first to check permissions
+	tag, err := s.GetTag(ctx, tagID, tenantID)
+	if err != nil {
+		return err
+	}
+
+	// Delete tag (repository handles document associations)
+	if err := s.tagRepo.Delete(ctx, tagID); err != nil {
+		return err
+	}
+
+	// Create audit log
+	s.createAuditLog(ctx, tenantID, userID, tagID, models.AuditDelete, "Tag deleted: "+tag.Name)
+
+	return nil
+}
+
+// GetTagSuggestions generates tag suggestions for text using keyword extraction
+func (s *DocumentService) GetTagSuggestions(ctx context.Context, tenantID uuid.UUID, text string, limit int) ([]string, error) {
+	// Extract keywords from text and match with existing tags
+	keywords := s.extractKeywordsFromText(text)
+	existingTags, err := s.tagRepo.ListByTenant(ctx, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get existing tags: %w", err)
+	}
+
+	var suggestions []string
+	suggestionMap := make(map[string]bool)
+
+	// Match keywords with existing tag names
+	for _, keyword := range keywords {
+		for _, tag := range existingTags {
+			if strings.Contains(strings.ToLower(tag.Name), strings.ToLower(keyword)) {
+				if !suggestionMap[tag.Name] {
+					suggestions = append(suggestions, tag.Name)
+					suggestionMap[tag.Name] = true
+				}
+			}
+		}
+	}
+
+	// Add raw keywords as suggestions if they don't match existing tags
+	for _, keyword := range keywords {
+		if !suggestionMap[keyword] && len(keyword) > 2 {
+			suggestions = append(suggestions, keyword)
+			suggestionMap[keyword] = true
+		}
+	}
+
+	// Limit suggestions
+	if limit > 0 && len(suggestions) > limit {
+		suggestions = suggestions[:limit]
+	}
+
+	return suggestions, nil
+}
+
+// BulkCreateTags creates multiple tags at once
+func (s *DocumentService) BulkCreateTags(ctx context.Context, tenantID, userID uuid.UUID, tagNames []string) ([]models.Tag, error) {
+	if len(tagNames) == 0 {
+		return []models.Tag{}, nil
+	}
+
+	var tags []models.Tag
+	var createdTags []models.Tag
+
+	// Prepare tags for creation
+	for _, name := range tagNames {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+
+		// Check if tag already exists
+		if existingTag, err := s.tagRepo.GetByName(ctx, tenantID, name); err == nil && existingTag != nil {
+			createdTags = append(createdTags, *existingTag)
+			continue
+		}
+
+		tag := models.Tag{
+			ID:            uuid.New(),
+			TenantID:      tenantID,
+			Name:          name,
+			Color:         "#6B7280",
+			IsAIGenerated: false,
+			UsageCount:    0,
+			CreatedAt:     time.Now(),
+		}
+		tags = append(tags, tag)
+	}
+
+	// Bulk create new tags
+	if len(tags) > 0 {
+		if err := s.tagRepo.BulkCreate(ctx, tags); err != nil {
+			return nil, fmt.Errorf("failed to bulk create tags: %w", err)
+		}
+		createdTags = append(createdTags, tags...)
+
+		// Create audit log for bulk creation
+		s.createAuditLog(ctx, tenantID, userID, uuid.New(), models.AuditCreate,
+			fmt.Sprintf("Bulk created %d tags", len(tags)))
+	}
+
+	return createdTags, nil
+}
+
+// Helper method to extract keywords from text for tag suggestions
+func (s *DocumentService) extractKeywordsFromText(text string) []string {
+	// Simple keyword extraction - split by common separators and filter
+	text = strings.ToLower(text)
+	separators := []string{" ", ",", ".", ";", ":", "\n", "\t", "-", "_", "(", ")", "[", "]", "{", "}"}
+
+	words := []string{text}
+	for _, sep := range separators {
+		var newWords []string
+		for _, word := range words {
+			newWords = append(newWords, strings.Split(word, sep)...)
+		}
+		words = newWords
+	}
+
+	// Filter and clean keywords
+	var keywords []string
+	stopWords := map[string]bool{
+		"the": true, "and": true, "or": true, "but": true, "in": true, "on": true, "at": true, "to": true,
+		"for": true, "of": true, "with": true, "by": true, "is": true, "are": true, "was": true, "were": true,
+		"be": true, "been": true, "have": true, "has": true, "had": true, "do": true, "does": true, "did": true,
+		"a": true, "an": true, "as": true, "if": true, "it": true, "its": true, "this": true, "that": true,
+	}
+
+	for _, word := range words {
+		word = strings.TrimSpace(word)
+		if len(word) > 2 && !stopWords[word] {
+			keywords = append(keywords, word)
+		}
+	}
+
+	// Remove duplicates and limit
+	uniqueKeywords := make(map[string]bool)
+	var result []string
+	for _, keyword := range keywords {
+		if !uniqueKeywords[keyword] {
+			result = append(result, keyword)
+			uniqueKeywords[keyword] = true
+		}
+		if len(result) >= 20 { // Limit to 20 keywords
+			break
+		}
+	}
+
+	return result
+}
+
+// CATEGORY MANAGEMENT METHODS
+
+// CreateCategory creates a new category with validation
+func (s *DocumentService) CreateCategory(ctx context.Context, tenantID, userID uuid.UUID, name, description, color, icon string, sortOrder int) (*models.Category, error) {
+	// Validate name
+	if strings.TrimSpace(name) == "" {
+		return nil, fmt.Errorf("category name cannot be empty")
+	}
+
+	// Check for duplicate names in tenant
+	if existingCategory, err := s.categoryRepo.GetByName(ctx, tenantID, name); err == nil && existingCategory != nil {
+		return nil, fmt.Errorf("category with name '%s' already exists", name)
+	}
+
+	// Set defaults
+	if color == "" {
+		color = "#6B7280"
+	}
+	if icon == "" {
+		icon = "folder"
+	}
+	if sortOrder < 0 {
+		sortOrder = 0
+	}
+
+	// Create category
+	category := &models.Category{
+		ID:          uuid.New(),
+		TenantID:    tenantID,
+		Name:        name,
+		Description: description,
+		Color:       color,
+		Icon:        icon,
+		IsSystem:    false,
+		SortOrder:   sortOrder,
+		CreatedAt:   time.Now(),
+	}
+
+	if err := s.categoryRepo.Create(ctx, category); err != nil {
+		return nil, fmt.Errorf("failed to create category: %w", err)
+	}
+
+	// Create audit log
+	s.createAuditLog(ctx, tenantID, userID, category.ID, models.AuditCreate, "Category created: "+name)
+
+	return category, nil
+}
+
+// GetCategory retrieves a category with access control
+func (s *DocumentService) GetCategory(ctx context.Context, categoryID, tenantID uuid.UUID) (*models.Category, error) {
+	category, err := s.categoryRepo.GetByID(ctx, categoryID)
+	if err != nil {
+		return nil, fmt.Errorf("category not found")
+	}
+
+	// Verify tenant access
+	if category.TenantID != tenantID {
+		return nil, fmt.Errorf("unauthorized access to category")
+	}
+
+	return category, nil
+}
+
+// GetCategoryByName retrieves a category by name
+func (s *DocumentService) GetCategoryByName(ctx context.Context, tenantID uuid.UUID, name string) (*models.Category, error) {
+	return s.categoryRepo.GetByName(ctx, tenantID, name)
+}
+
+// ListCategories lists all categories for a tenant
+func (s *DocumentService) ListCategories(ctx context.Context, tenantID uuid.UUID) ([]models.Category, error) {
+	return s.categoryRepo.ListByTenant(ctx, tenantID)
+}
+
+// ListCategoriesWithDocumentCount lists categories with document counts
+func (s *DocumentService) ListCategoriesWithDocumentCount(ctx context.Context, tenantID uuid.UUID) ([]CategoryWithCount, error) {
+	categories, err := s.categoryRepo.ListByTenant(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+
+	var result []CategoryWithCount
+	for _, category := range categories {
+		count, err := s.categoryRepo.GetDocumentCount(ctx, category.ID)
+		if err != nil {
+			count = 0 // Continue with 0 count if we can't get the count
+		}
+
+		result = append(result, CategoryWithCount{
+			Category:      category,
+			DocumentCount: int(count),
+		})
+	}
+
+	return result, nil
+}
+
+// GetSystemCategories gets system-defined categories
+func (s *DocumentService) GetSystemCategories(ctx context.Context, tenantID uuid.UUID) ([]models.Category, error) {
+	categories, err := s.categoryRepo.ListByTenant(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+
+	var systemCategories []models.Category
+	for _, category := range categories {
+		if category.IsSystem {
+			systemCategories = append(systemCategories, category)
+		}
+	}
+
+	return systemCategories, nil
+}
+
+// UpdateCategory updates an existing category
+func (s *DocumentService) UpdateCategory(ctx context.Context, categoryID, tenantID uuid.UUID, updates map[string]interface{}, userID uuid.UUID) (*models.Category, error) {
+	// Get existing category
+	category, err := s.GetCategory(ctx, categoryID, tenantID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Check if it's a system category
+	if category.IsSystem {
+		return nil, fmt.Errorf("cannot modify system category")
+	}
+
+	// Apply updates
+	updated := false
+	if name, ok := updates["name"].(string); ok && strings.TrimSpace(name) != "" {
+		if name != category.Name {
+			// Check for name conflicts
+			if existingCategory, err := s.categoryRepo.GetByName(ctx, tenantID, name); err == nil && existingCategory != nil && existingCategory.ID != category.ID {
+				return nil, fmt.Errorf("category with name '%s' already exists", name)
+			}
+			category.Name = name
+			updated = true
+		}
+	}
+
+	if description, ok := updates["description"].(string); ok {
+		category.Description = description
+		updated = true
+	}
+
+	if color, ok := updates["color"].(string); ok && color != "" {
+		category.Color = color
+		updated = true
+	}
+
+	if icon, ok := updates["icon"].(string); ok && icon != "" {
+		category.Icon = icon
+		updated = true
+	}
+
+	if sortOrder, ok := updates["sort_order"].(int); ok && sortOrder >= 0 {
+		category.SortOrder = sortOrder
+		updated = true
+	}
+
+	if updated {
+		if err := s.categoryRepo.Update(ctx, category); err != nil {
+			return nil, fmt.Errorf("failed to update category: %w", err)
+		}
+
+		// Create audit log
+		s.createAuditLog(ctx, tenantID, userID, category.ID, models.AuditUpdate, "Category updated")
+	}
+
+	return category, nil
+}
+
+// DeleteCategory deletes a category with validation
+func (s *DocumentService) DeleteCategory(ctx context.Context, categoryID, tenantID, userID uuid.UUID) error {
+	// Get category first to check permissions
+	category, err := s.GetCategory(ctx, categoryID, tenantID)
+	if err != nil {
+		return err
+	}
+
+	// Check if it's a system category
+	if category.IsSystem {
+		return fmt.Errorf("cannot delete system category")
+	}
+
+	// Delete category (repository handles document associations)
+	if err := s.categoryRepo.Delete(ctx, categoryID); err != nil {
+		return err
+	}
+
+	// Create audit log
+	s.createAuditLog(ctx, tenantID, userID, categoryID, models.AuditDelete, "Category deleted: "+category.Name)
+
+	return nil
+}
+
+// Helper struct for categories with document counts
+type CategoryWithCount struct {
+	models.Category
+	DocumentCount int `json:"document_count"`
 }

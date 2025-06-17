@@ -32,7 +32,12 @@ func (r *CategoryRepository) Create(ctx context.Context, category *models.Catego
 
 func (r *CategoryRepository) GetByID(ctx context.Context, id uuid.UUID) (*models.Category, error) {
 	var category models.Category
-	err := r.db.WithContext(ctx).Preload("Tenant").Where("id = ?", id).First(&category).Error
+	// Use selective preloading to optimize performance
+	err := r.db.WithContext(ctx).
+		Preload("Tenant", func(db *gorm.DB) *gorm.DB {
+			return db.Select("id", "name", "subdomain")
+		}).
+		Where("id = ?", id).First(&category).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, fmt.Errorf("category not found")

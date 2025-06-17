@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/archivus/archivus/internal/domain/repositories"
 	"github.com/archivus/archivus/internal/infrastructure/database"
@@ -156,24 +157,12 @@ func (r *TenantRepository) Delete(ctx context.Context, id uuid.UUID) error {
 
 // Helper function to check for duplicate key errors
 func isDuplicateKeyError(err error) bool {
-	return err != nil && (
-	// PostgreSQL duplicate key error codes
-	containsString(err.Error(), "duplicate key") ||
-		containsString(err.Error(), "unique constraint") ||
-		containsString(err.Error(), "UNIQUE constraint failed"))
-}
-
-func containsString(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > len(substr) &&
-		(s[:len(substr)] == substr || s[len(s)-len(substr):] == substr ||
-			findInString(s, substr)))
-}
-
-func findInString(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
+	if err == nil {
+		return false
 	}
-	return false
+	errStr := err.Error()
+	// Use Go's built-in strings.Contains for efficient string searching
+	return strings.Contains(errStr, "duplicate key") ||
+		strings.Contains(errStr, "unique constraint") ||
+		strings.Contains(errStr, "UNIQUE constraint failed")
 }

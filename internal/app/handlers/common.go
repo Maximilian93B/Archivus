@@ -9,19 +9,11 @@ import (
 	"time"
 
 	"github.com/archivus/archivus/internal/domain/dto"
-	"github.com/archivus/archivus/internal/infrastructure/database/models"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
 
-// UserContext represents the authenticated user context
-type UserContext struct {
-	UserID   uuid.UUID       `json:"user_id"`
-	TenantID uuid.UUID       `json:"tenant_id"`
-	Email    string          `json:"email"`
-	Role     models.UserRole `json:"role"`
-	IsActive bool            `json:"is_active"`
-}
+// UserContext is now defined in middleware package to avoid duplication
 
 // AuthTokenClaims represents JWT token claims
 type AuthTokenClaims struct {
@@ -39,20 +31,7 @@ const (
 	TenantIDKey    = "tenant_id"
 )
 
-// GetUserContext retrieves user context from gin context
-func GetUserContext(c *gin.Context) *UserContext {
-	if value, exists := c.Get(UserContextKey); exists {
-		if userCtx, ok := value.(*UserContext); ok {
-			return userCtx
-		}
-	}
-	return nil
-}
-
-// SetUserContext sets user context in gin context
-func SetUserContext(c *gin.Context, userCtx *UserContext) {
-	c.Set(UserContextKey, userCtx)
-}
+// GetUserContext and SetUserContext are now defined in middleware package
 
 // GetRequestID retrieves request ID from gin context
 func GetRequestID(c *gin.Context) string {

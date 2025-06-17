@@ -30,12 +30,23 @@ func (r *DocumentRepository) Create(ctx context.Context, document *models.Docume
 
 func (r *DocumentRepository) GetByID(ctx context.Context, id uuid.UUID) (*models.Document, error) {
 	var document models.Document
+	// For single document details, preload relationships with selective fields to optimize performance
 	err := r.db.WithContext(ctx).
-		Preload("Tenant").
-		Preload("Folder").
-		Preload("Creator").
-		Preload("Tags").
-		Preload("Categories").
+		Preload("Tenant", func(db *gorm.DB) *gorm.DB {
+			return db.Select("id", "name", "subdomain", "subscription_tier")
+		}).
+		Preload("Folder", func(db *gorm.DB) *gorm.DB {
+			return db.Select("id", "name", "path", "tenant_id")
+		}).
+		Preload("Creator", func(db *gorm.DB) *gorm.DB {
+			return db.Select("id", "first_name", "last_name", "email", "role")
+		}).
+		Preload("Tags", func(db *gorm.DB) *gorm.DB {
+			return db.Select("id", "name", "color")
+		}).
+		Preload("Categories", func(db *gorm.DB) *gorm.DB {
+			return db.Select("id", "name", "color", "description")
+		}).
 		Where("id = ?", id).First(&document).Error
 
 	if err != nil {
@@ -134,7 +145,15 @@ func (r *DocumentRepository) List(ctx context.Context, tenantID uuid.UUID, filte
 		orderBy = fmt.Sprintf("%s %s", filters.SortBy, direction)
 	}
 
-	err := query.Preload("Creator").Preload("Folder").Preload("Tags").Preload("Categories").
+	// For listing, only preload essential fields to avoid performance issues
+	err := query.
+		Preload("Creator", func(db *gorm.DB) *gorm.DB {
+			return db.Select("id", "first_name", "last_name", "email")
+		}).
+		Preload("Folder", func(db *gorm.DB) *gorm.DB {
+			return db.Select("id", "name", "path")
+		}).
+		Select("id", "title", "file_name", "document_type", "status", "file_size", "created_at", "created_by", "folder_id", "tenant_id").
 		Order(orderBy).Offset(offset).Limit(filters.PageSize).Find(&documents).Error
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to list documents: %w", err)
@@ -183,7 +202,15 @@ func (r *DocumentRepository) Search(ctx context.Context, tenantID uuid.UUID, que
 		limit = 50
 	}
 
-	err := db.Preload("Creator").Preload("Folder").Preload("Tags").Preload("Categories").
+	// For search results, only preload essential fields to avoid performance issues
+	err := db.
+		Preload("Creator", func(db *gorm.DB) *gorm.DB {
+			return db.Select("id", "first_name", "last_name", "email")
+		}).
+		Preload("Folder", func(db *gorm.DB) *gorm.DB {
+			return db.Select("id", "name", "path")
+		}).
+		Select("id", "title", "file_name", "document_type", "status", "file_size", "created_at", "created_by", "folder_id", "tenant_id", "extracted_text").
 		Order("created_at DESC").Limit(limit).Find(&documents).Error
 	if err != nil {
 		return nil, fmt.Errorf("failed to search documents: %w", err)
@@ -230,7 +257,12 @@ func (r *DocumentRepository) GetByFolder(ctx context.Context, folderID uuid.UUID
 		orderBy = fmt.Sprintf("%s %s", params.SortBy, direction)
 	}
 
-	err := query.Preload("Creator").Preload("Tags").Preload("Categories").
+	// For folder listing, only preload essential creator info to avoid performance issues
+	err := query.
+		Preload("Creator", func(db *gorm.DB) *gorm.DB {
+			return db.Select("id", "first_name", "last_name", "email")
+		}).
+		Select("id", "title", "file_name", "document_type", "status", "file_size", "created_at", "created_by", "folder_id", "tenant_id").
 		Order(orderBy).Offset(offset).Limit(params.PageSize).Find(&documents).Error
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to get documents by folder: %w", err)
@@ -242,10 +274,17 @@ func (r *DocumentRepository) GetByFolder(ctx context.Context, folderID uuid.UUID
 func (r *DocumentRepository) GetByTags(ctx context.Context, tenantID uuid.UUID, tagIDs []uuid.UUID) ([]models.Document, error) {
 	var documents []models.Document
 
+	// For documents by tags, use selective preloading to optimize performance
 	err := r.db.WithContext(ctx).
 		Joins("JOIN document_tags ON documents.id = document_tags.document_id").
 		Where("documents.tenant_id = ? AND document_tags.tag_id IN ?", tenantID, tagIDs).
-		Preload("Creator").Preload("Folder").Preload("Tags").Preload("Categories").
+		Preload("Creator", func(db *gorm.DB) *gorm.DB {
+			return db.Select("id", "first_name", "last_name", "email")
+		}).
+		Preload("Folder", func(db *gorm.DB) *gorm.DB {
+			return db.Select("id", "name", "path")
+		}).
+		Select("id", "title", "file_name", "document_type", "status", "file_size", "created_at", "created_by", "folder_id", "tenant_id").
 		Find(&documents).Error
 
 	if err != nil {
@@ -258,10 +297,17 @@ func (r *DocumentRepository) GetByTags(ctx context.Context, tenantID uuid.UUID, 
 func (r *DocumentRepository) GetByCategories(ctx context.Context, tenantID uuid.UUID, categoryIDs []uuid.UUID) ([]models.Document, error) {
 	var documents []models.Document
 
+	// For documents by categories, use selective preloading to optimize performance
 	err := r.db.WithContext(ctx).
 		Joins("JOIN document_categories ON documents.id = document_categories.document_id").
 		Where("documents.tenant_id = ? AND document_categories.category_id IN ?", tenantID, categoryIDs).
-		Preload("Creator").Preload("Folder").Preload("Tags").Preload("Categories").
+		Preload("Creator", func(db *gorm.DB) *gorm.DB {
+			return db.Select("id", "first_name", "last_name", "email")
+		}).
+		Preload("Folder", func(db *gorm.DB) *gorm.DB {
+			return db.Select("id", "name", "path")
+		}).
+		Select("id", "title", "file_name", "document_type", "status", "file_size", "created_at", "created_by", "folder_id", "tenant_id").
 		Find(&documents).Error
 
 	if err != nil {
@@ -312,9 +358,16 @@ func (r *DocumentRepository) GetDuplicates(ctx context.Context, tenantID uuid.UU
 func (r *DocumentRepository) GetExpiring(ctx context.Context, tenantID uuid.UUID, days int) ([]models.Document, error) {
 	var documents []models.Document
 
+	// For expiring documents, use selective preloading to optimize performance
 	err := r.db.WithContext(ctx).
 		Where("tenant_id = ? AND expiry_date IS NOT NULL AND expiry_date <= NOW() + INTERVAL '%d days'", tenantID, days).
-		Preload("Creator").Preload("Folder").
+		Preload("Creator", func(db *gorm.DB) *gorm.DB {
+			return db.Select("id", "first_name", "last_name", "email")
+		}).
+		Preload("Folder", func(db *gorm.DB) *gorm.DB {
+			return db.Select("id", "name", "path")
+		}).
+		Select("id", "title", "file_name", "document_type", "status", "expiry_date", "created_at", "created_by", "folder_id", "tenant_id").
 		Order("expiry_date ASC").
 		Find(&documents).Error
 
@@ -375,7 +428,15 @@ func (r *DocumentRepository) GetFinancialDocuments(ctx context.Context, tenantID
 		orderBy = fmt.Sprintf("%s %s", filters.SortBy, direction)
 	}
 
-	err := query.Preload("Creator").Preload("Folder").
+	// For financial documents, use selective preloading to optimize performance
+	err := query.
+		Preload("Creator", func(db *gorm.DB) *gorm.DB {
+			return db.Select("id", "first_name", "last_name", "email")
+		}).
+		Preload("Folder", func(db *gorm.DB) *gorm.DB {
+			return db.Select("id", "name", "path")
+		}).
+		Select("id", "title", "file_name", "document_type", "status", "amount", "currency", "vendor_name", "customer_name", "document_date", "created_at", "created_by", "folder_id", "tenant_id").
 		Order(orderBy).Offset(offset).Limit(filters.PageSize).Find(&documents).Error
 	if err != nil {
 		return nil, fmt.Errorf("failed to get financial documents: %w", err)

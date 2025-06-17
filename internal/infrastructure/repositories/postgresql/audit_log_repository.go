@@ -9,6 +9,7 @@ import (
 	"github.com/archivus/archivus/internal/infrastructure/database"
 	"github.com/archivus/archivus/internal/infrastructure/database/models"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 type AuditLogRepository struct {
@@ -55,8 +56,15 @@ func (r *AuditLogRepository) ListByResource(ctx context.Context, resourceID uuid
 		orderBy = fmt.Sprintf("%s %s", params.SortBy, direction)
 	}
 
-	// Load audit logs with user information
-	err := query.Preload("User").Preload("Tenant").
+	// Load audit logs with user information - use selective preloading to optimize performance
+	err := query.
+		Preload("User", func(db *gorm.DB) *gorm.DB {
+			return db.Select("id", "first_name", "last_name", "email", "role")
+		}).
+		Preload("Tenant", func(db *gorm.DB) *gorm.DB {
+			return db.Select("id", "name", "subdomain")
+		}).
+		Select("id", "tenant_id", "user_id", "resource_id", "action", "resource_type", "ip_address", "user_agent", "details", "created_at").
 		Order(orderBy).Offset(offset).Limit(params.PageSize).Find(&logs).Error
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to list audit logs by resource: %w", err)
@@ -94,8 +102,12 @@ func (r *AuditLogRepository) ListByUser(ctx context.Context, userID uuid.UUID, p
 		orderBy = fmt.Sprintf("%s %s", params.SortBy, direction)
 	}
 
-	// Load audit logs with tenant information
-	err := query.Preload("Tenant").
+	// Load audit logs with tenant information - use selective preloading to optimize performance
+	err := query.
+		Preload("Tenant", func(db *gorm.DB) *gorm.DB {
+			return db.Select("id", "name", "subdomain")
+		}).
+		Select("id", "tenant_id", "user_id", "resource_id", "action", "resource_type", "ip_address", "user_agent", "details", "created_at").
 		Order(orderBy).Offset(offset).Limit(params.PageSize).Find(&logs).Error
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to list audit logs by user: %w", err)
@@ -133,8 +145,12 @@ func (r *AuditLogRepository) ListByTenant(ctx context.Context, tenantID uuid.UUI
 		orderBy = fmt.Sprintf("%s %s", params.SortBy, direction)
 	}
 
-	// Load audit logs with user information
-	err := query.Preload("User").
+	// Load audit logs with user information - use selective preloading to optimize performance
+	err := query.
+		Preload("User", func(db *gorm.DB) *gorm.DB {
+			return db.Select("id", "first_name", "last_name", "email", "role")
+		}).
+		Select("id", "tenant_id", "user_id", "resource_id", "action", "resource_type", "ip_address", "user_agent", "details", "created_at").
 		Order(orderBy).Offset(offset).Limit(params.PageSize).Find(&logs).Error
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to list audit logs by tenant: %w", err)
@@ -155,7 +171,12 @@ func (r *AuditLogRepository) GetSecurityEvents(ctx context.Context, tenantID uui
 		models.AuditReject,  // Workflow rejections
 	}
 
-	err := r.db.WithContext(ctx).Preload("User").
+	// Use selective preloading to optimize performance
+	err := r.db.WithContext(ctx).
+		Preload("User", func(db *gorm.DB) *gorm.DB {
+			return db.Select("id", "first_name", "last_name", "email", "role")
+		}).
+		Select("id", "tenant_id", "user_id", "resource_id", "action", "resource_type", "ip_address", "user_agent", "details", "created_at").
 		Where("tenant_id = ? AND created_at >= ? AND action IN ?", tenantID, since, securityActions).
 		Order("created_at DESC").Find(&logs).Error
 	if err != nil {

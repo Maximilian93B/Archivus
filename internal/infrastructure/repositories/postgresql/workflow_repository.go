@@ -29,7 +29,14 @@ func (r *WorkflowRepository) Create(ctx context.Context, workflow *models.Workfl
 
 func (r *WorkflowRepository) GetByID(ctx context.Context, id uuid.UUID) (*models.Workflow, error) {
 	var workflow models.Workflow
-	err := r.db.WithContext(ctx).Preload("Tenant").Preload("Creator").
+	// Use selective preloading to optimize performance
+	err := r.db.WithContext(ctx).
+		Preload("Tenant", func(db *gorm.DB) *gorm.DB {
+			return db.Select("id", "name", "subdomain", "subscription_tier")
+		}).
+		Preload("Creator", func(db *gorm.DB) *gorm.DB {
+			return db.Select("id", "first_name", "last_name", "email", "role")
+		}).
 		Where("id = ?", id).First(&workflow).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -53,7 +60,12 @@ func (r *WorkflowRepository) Update(ctx context.Context, workflow *models.Workfl
 
 func (r *WorkflowRepository) ListByTenant(ctx context.Context, tenantID uuid.UUID) ([]models.Workflow, error) {
 	var workflows []models.Workflow
-	err := r.db.WithContext(ctx).Preload("Creator").
+	// Use selective preloading and field selection to optimize performance
+	err := r.db.WithContext(ctx).
+		Preload("Creator", func(db *gorm.DB) *gorm.DB {
+			return db.Select("id", "first_name", "last_name", "email")
+		}).
+		Select("id", "tenant_id", "name", "description", "doc_type", "is_active", "created_by", "created_at", "updated_at").
 		Where("tenant_id = ?", tenantID).
 		Order("name ASC").Find(&workflows).Error
 	if err != nil {
@@ -64,7 +76,12 @@ func (r *WorkflowRepository) ListByTenant(ctx context.Context, tenantID uuid.UUI
 
 func (r *WorkflowRepository) GetByDocumentType(ctx context.Context, tenantID uuid.UUID, docType models.DocumentType) ([]models.Workflow, error) {
 	var workflows []models.Workflow
-	err := r.db.WithContext(ctx).Preload("Creator").
+	// Use selective preloading and field selection to optimize performance
+	err := r.db.WithContext(ctx).
+		Preload("Creator", func(db *gorm.DB) *gorm.DB {
+			return db.Select("id", "first_name", "last_name", "email")
+		}).
+		Select("id", "tenant_id", "name", "description", "doc_type", "rules", "created_by", "created_at").
 		Where("tenant_id = ? AND doc_type = ? AND is_active = ?", tenantID, docType, true).
 		Order("name ASC").Find(&workflows).Error
 	if err != nil {

@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/archivus/archivus/internal/app/middleware"
 	"github.com/archivus/archivus/internal/domain/repositories"
 	"github.com/archivus/archivus/internal/domain/services"
 	"github.com/archivus/archivus/internal/infrastructure/database/models"
@@ -115,7 +116,7 @@ func (h *DocumentHandler) RegisterRoutes(router *gin.RouterGroup) {
 // @Router /api/v1/documents/upload [post]
 func (h *DocumentHandler) UploadDocument(c *gin.Context) {
 	// Get user context from middleware
-	userCtx := GetUserContext(c)
+	userCtx := middleware.GetUserContext(c)
 	if userCtx == nil {
 		c.JSON(http.StatusUnauthorized, ErrorResponse{
 			Error:   "unauthorized",
@@ -250,7 +251,7 @@ func (h *DocumentHandler) UploadDocument(c *gin.Context) {
 // @Failure 404 {object} ErrorResponse
 // @Router /api/v1/documents/{id} [get]
 func (h *DocumentHandler) GetDocument(c *gin.Context) {
-	userCtx := GetUserContext(c)
+	userCtx := middleware.GetUserContext(c)
 	if userCtx == nil {
 		c.JSON(http.StatusUnauthorized, ErrorResponse{
 			Error:   "unauthorized",
@@ -314,7 +315,7 @@ func (h *DocumentHandler) GetDocument(c *gin.Context) {
 // @Success 200 {object} PaginatedResponse
 // @Router /api/v1/documents [get]
 func (h *DocumentHandler) ListDocuments(c *gin.Context) {
-	userCtx := GetUserContext(c)
+	userCtx := middleware.GetUserContext(c)
 	if userCtx == nil {
 		c.JSON(http.StatusUnauthorized, ErrorResponse{
 			Error:   "unauthorized",
@@ -391,7 +392,7 @@ func (h *DocumentHandler) ListDocuments(c *gin.Context) {
 // @Success 200 {array} DocumentResponse
 // @Router /api/v1/documents/search [post]
 func (h *DocumentHandler) SearchDocuments(c *gin.Context) {
-	userCtx := GetUserContext(c)
+	userCtx := middleware.GetUserContext(c)
 	if userCtx == nil {
 		c.JSON(http.StatusUnauthorized, ErrorResponse{
 			Error:   "unauthorized",
@@ -486,7 +487,7 @@ func (h *DocumentHandler) SearchDocuments(c *gin.Context) {
 // @Success 200 {object} DocumentResponse
 // @Router /api/v1/documents/{id} [put]
 func (h *DocumentHandler) UpdateDocument(c *gin.Context) {
-	userCtx := GetUserContext(c)
+	userCtx := middleware.GetUserContext(c)
 	if userCtx == nil {
 		c.JSON(http.StatusUnauthorized, ErrorResponse{
 			Error:   "unauthorized",
@@ -559,7 +560,7 @@ func (h *DocumentHandler) UpdateDocument(c *gin.Context) {
 // @Success 204
 // @Router /api/v1/documents/{id} [delete]
 func (h *DocumentHandler) DeleteDocument(c *gin.Context) {
-	userCtx := GetUserContext(c)
+	userCtx := middleware.GetUserContext(c)
 	if userCtx == nil {
 		c.JSON(http.StatusUnauthorized, ErrorResponse{
 			Error:   "unauthorized",
@@ -617,7 +618,7 @@ func (h *DocumentHandler) DeleteDocument(c *gin.Context) {
 // @Success 202 {object} map[string]string
 // @Router /api/v1/documents/{id}/process-financial [post]
 func (h *DocumentHandler) ProcessFinancialDocument(c *gin.Context) {
-	userCtx := GetUserContext(c)
+	userCtx := middleware.GetUserContext(c)
 	if userCtx == nil {
 		c.JSON(http.StatusUnauthorized, ErrorResponse{
 			Error:   "unauthorized",
@@ -672,7 +673,7 @@ func (h *DocumentHandler) ProcessFinancialDocument(c *gin.Context) {
 // @Success 200 {array} repositories.DocumentDuplicate
 // @Router /api/v1/documents/duplicates [get]
 func (h *DocumentHandler) FindDuplicates(c *gin.Context) {
-	userCtx := GetUserContext(c)
+	userCtx := middleware.GetUserContext(c)
 	if userCtx == nil {
 		c.JSON(http.StatusUnauthorized, ErrorResponse{
 			Error:   "unauthorized",
@@ -710,7 +711,7 @@ func (h *DocumentHandler) FindDuplicates(c *gin.Context) {
 // @Success 200 {array} DocumentResponse
 // @Router /api/v1/documents/expiring [get]
 func (h *DocumentHandler) GetExpiringDocuments(c *gin.Context) {
-	userCtx := GetUserContext(c)
+	userCtx := middleware.GetUserContext(c)
 	if userCtx == nil {
 		c.JSON(http.StatusUnauthorized, ErrorResponse{
 			Error:   "unauthorized",
@@ -744,7 +745,7 @@ func (h *DocumentHandler) GetExpiringDocuments(c *gin.Context) {
 
 // DownloadDocument serves the document file for download
 func (h *DocumentHandler) DownloadDocument(c *gin.Context) {
-	userCtx := GetUserContext(c)
+	userCtx := middleware.GetUserContext(c)
 	if userCtx == nil {
 		c.JSON(http.StatusUnauthorized, ErrorResponse{
 			Error:   "unauthorized",
@@ -804,7 +805,7 @@ func (h *DocumentHandler) PreviewDocument(c *gin.Context) {
 
 // Helper methods
 
-func (h *DocumentHandler) getDocumentPermissions(userCtx *UserContext, document *models.Document) map[string]bool {
+func (h *DocumentHandler) getDocumentPermissions(userCtx *middleware.UserContext, document *models.Document) map[string]bool {
 	permissions := map[string]bool{
 		"read":   true, // User can access document, so they can read
 		"update": false,

@@ -32,7 +32,11 @@ func (r *TagRepository) Create(ctx context.Context, tag *models.Tag) error {
 
 func (r *TagRepository) GetByID(ctx context.Context, id uuid.UUID) (*models.Tag, error) {
 	var tag models.Tag
-	err := r.db.WithContext(ctx).Preload("Tenant").Where("id = ?", id).First(&tag).Error
+	err := r.db.WithContext(ctx).
+		Preload("Tenant", func(db *gorm.DB) *gorm.DB {
+			return db.Select("id", "name", "subdomain")
+		}).
+		Where("id = ?", id).First(&tag).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, fmt.Errorf("tag not found")

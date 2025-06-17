@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/archivus/archivus/internal/domain/repositories"
 	"github.com/archivus/archivus/internal/infrastructure/database"
@@ -22,6 +23,13 @@ func NewFolderRepository(db *database.DB) repositories.FolderRepository {
 
 func (r *FolderRepository) Create(ctx context.Context, folder *models.Folder) error {
 	if err := r.db.WithContext(ctx).Create(folder).Error; err != nil {
+		// Check for duplicate path constraint violation
+		if errors.Is(err, gorm.ErrDuplicatedKey) ||
+			(err != nil && (strings.Contains(err.Error(), "duplicate key") ||
+				strings.Contains(err.Error(), "idx_tenant_folder_path") ||
+				strings.Contains(err.Error(), "unique constraint"))) {
+			return fmt.Errorf("folder with path '%s' already exists in this tenant", folder.Path)
+		}
 		return fmt.Errorf("failed to create folder: %w", err)
 	}
 	return nil
@@ -29,7 +37,17 @@ func (r *FolderRepository) Create(ctx context.Context, folder *models.Folder) er
 
 func (r *FolderRepository) GetByID(ctx context.Context, id uuid.UUID) (*models.Folder, error) {
 	var folder models.Folder
-	err := r.db.WithContext(ctx).Preload("Tenant").Preload("Parent").Preload("Creator").
+	// Use selective preloading to optimize performance
+	err := r.db.WithContext(ctx).
+		Preload("Tenant", func(db *gorm.DB) *gorm.DB {
+			return db.Select("id", "name", "subdomain")
+		}).
+		Preload("Parent", func(db *gorm.DB) *gorm.DB {
+			return db.Select("id", "name", "path")
+		}).
+		Preload("Creator", func(db *gorm.DB) *gorm.DB {
+			return db.Select("id", "first_name", "last_name", "email")
+		}).
 		Where("id = ?", id).First(&folder).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -75,35 +93,39 @@ func (r *FolderRepository) GetChildren(ctx context.Context, parentID uuid.UUID) 
 
 func (r *FolderRepository) GetTree(ctx context.Context, tenantID uuid.UUID) ([]repositories.FolderNode, error) {
 	var folders []models.Folder
-	err := r.db.WithContext(ctx).Where("tenant_id = ?", tenantID).
+	// Only select fields we need for the tree to optimize performance
+	err := r.db.WithContext(ctx).
+		Select("id", "parent_id", "name", "path", "level", "color", "icon", "tenant_id").
+		Where("tenant_id = ?", tenantID).
 		Order("level ASC, name ASC").Find(&folders).Error
 	if err != nil {
 		return nil, fmt.Errorf("failed to get folder tree: %w", err)
 	}
 
-	// Build folder tree
-	folderMap := make(map[uuid.UUID]*repositories.FolderNode)
+	// Optimized O(n) tree building algorithm
+	// Create map for O(1) lookup and initialize all nodes
+	nodeMap := make(map[uuid.UUID]*repositories.FolderNode)
 	var rootNodes []repositories.FolderNode
 
 	// First pass: create all nodes
-	for _, folder := range folders {
-		node := repositories.FolderNode{
-			Folder:        &folder,
+	for i := range folders {
+		node := &repositories.FolderNode{
+			Folder:        &folders[i],
 			Children:      make([]repositories.FolderNode, 0),
 			DocumentCount: 0, // Will be populated separately if needed
 		}
-		folderMap[folder.ID] = &node
+		nodeMap[folders[i].ID] = node
 	}
 
-	// Second pass: build the tree structure
+	// Second pass: build parent-child relationships - O(n) total complexity
 	for _, folder := range folders {
-		node := folderMap[folder.ID]
+		node := nodeMap[folder.ID]
 		if folder.ParentID == nil {
-			// Root folder
+			// Root node
 			rootNodes = append(rootNodes, *node)
 		} else {
-			// Child folder
-			if parent, exists := folderMap[*folder.ParentID]; exists {
+			// Child node - add to parent's children
+			if parent, exists := nodeMap[*folder.ParentID]; exists {
 				parent.Children = append(parent.Children, *node)
 			}
 		}
