@@ -395,11 +395,11 @@ type Notification struct {
 // Keep existing models with minor enhancements
 type Folder struct {
 	ID          uuid.UUID  `json:"id" gorm:"type:uuid;primary_key;default:uuid_generate_v4()"`
-	TenantID    uuid.UUID  `json:"tenant_id" gorm:"type:uuid;not null;index"`
+	TenantID    uuid.UUID  `json:"tenant_id" gorm:"type:uuid;not null;uniqueIndex:idx_tenant_folder_path"`
 	ParentID    *uuid.UUID `json:"parent_id" gorm:"type:uuid;index"`
 	Name        string     `json:"name" gorm:"type:varchar(255);not null"`
 	Description string     `json:"description" gorm:"type:text"`
-	Path        string     `json:"path" gorm:"type:varchar(2048);not null;index"`
+	Path        string     `json:"path" gorm:"type:varchar(2048);not null;uniqueIndex:idx_tenant_folder_path"`
 	Level       int        `json:"level" gorm:"not null;default:0"`
 	IsSystem    bool       `json:"is_system" gorm:"not null;default:false"`
 	Color       string     `json:"color" gorm:"type:varchar(7);default:'#6B7280'"`

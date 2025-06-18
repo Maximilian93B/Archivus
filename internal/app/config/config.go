@@ -17,6 +17,7 @@ type Config struct {
 	Redis       RedisConfig
 	JWT         JWTConfig
 	Storage     StorageConfig
+	Supabase    SupabaseConfig
 	AI          AIConfig
 	Features    FeatureConfig
 	Limits      LimitsConfig
@@ -34,7 +35,13 @@ type DatabaseConfig struct {
 }
 
 type RedisConfig struct {
-	URL string
+	URL      string
+	Host     string
+	Port     int
+	Username string
+	Password string
+	DB       int
+	PoolSize int
 }
 
 type JWTConfig struct {
@@ -49,6 +56,14 @@ type StorageConfig struct {
 	S3Region  string
 	AccessKey string
 	SecretKey string
+}
+
+type SupabaseConfig struct {
+	URL        string
+	APIKey     string
+	ServiceKey string
+	Bucket     string
+	JWTSecret  string
 }
 
 type AIConfig struct {
@@ -103,7 +118,13 @@ func Load() (*Config, error) {
 			TestURL: getEnv("DATABASE_URL_TEST", ""),
 		},
 		Redis: RedisConfig{
-			URL: getEnv("REDIS_URL", "redis://localhost:6379"),
+			URL:      getEnv("REDIS_URL", "redis://localhost:6379"),
+			Host:     getEnv("REDIS_HOST", "localhost"),
+			Port:     parseInt(getEnv("REDIS_PORT", "6379")),
+			Username: getEnv("REDIS_USERNAME", ""),
+			Password: getEnv("REDIS_PASSWORD", ""),
+			DB:       parseInt(getEnv("REDIS_DB", "0")),
+			PoolSize: parseInt(getEnv("REDIS_POOL_SIZE", "10")),
 		},
 		JWT: JWTConfig{
 			Secret: getEnv("JWT_SECRET", ""),
@@ -116,6 +137,13 @@ func Load() (*Config, error) {
 			S3Region:  getEnv("S3_REGION", "us-west-2"),
 			AccessKey: getEnv("AWS_ACCESS_KEY_ID", ""),
 			SecretKey: getEnv("AWS_SECRET_ACCESS_KEY", ""),
+		},
+		Supabase: SupabaseConfig{
+			URL:        getEnv("SUPABASE_URL", ""),
+			APIKey:     getEnv("SUPABASE_API_KEY", ""),
+			ServiceKey: getEnv("SUPABASE_SERVICE_KEY", ""),
+			Bucket:     getEnv("SUPABASE_BUCKET", ""),
+			JWTSecret:  getEnv("SUPABASE_JWT_SECRET", ""),
 		},
 		AI: AIConfig{
 			OpenAI: OpenAIConfig{

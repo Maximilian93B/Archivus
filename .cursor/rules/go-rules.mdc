@@ -1,0 +1,83 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+# Go Development and Production Rules
+
+## 🛠 Development Rules
+
+1. **Use Modules**  
+   Always use Go Modules (`go.mod`) for dependency management.
+
+2. **Idiomatic Code**  
+   Follow [Effective Go](mdc:https:/golang.org/doc/effective_go.html) and use `gofmt` / `goimports`.
+
+3. **Project Structure**  
+   - Use `/cmd` for application entry points.  
+   - Use `/internal` for private application logic.  
+   - Use `/pkg` for shared, reusable libraries.  
+   - Use `/api`, `/configs`, `/scripts`, `/build` as needed for clarity and separation.
+
+4. **Error Handling**  
+   Handle all errors explicitly and use wrapped errors (`fmt.Errorf("%w", err)`) for context.
+
+5. **Testing**  
+   Use `*_test.go` files and prefer table-driven tests for coverage and clarity.
+
+6. **Linting & Vetting**  
+   Use `golangci-lint`, `go vet`, and `staticcheck` to enforce code quality.
+
+7. **Use Interfaces**  
+   Depend on abstractions to enhance testability and decoupling.
+
+8. **Context-Aware Code**  
+   Accept `context.Context` in request-scoped functions to support cancellation and timeouts.
+
+9. **Avoid Global State**  
+   Use dependency injection or functional options pattern instead of global vars.
+
+10. **Keep it Simple**  
+    Prefer readable and maintainable code over clever hacks.
+
+---
+
+## 🚀 Production Rules
+
+1. **Build with `-trimpath`**  
+   Strip file paths from binaries to avoid leaking sensitive info.
+
+2. **Use Static Binaries**  
+   Build with `CGO_ENABLED=0` for maximum portability.
+
+3. **Graceful Shutdown**  
+   Trap OS signals (`SIGINT`, `SIGTERM`) and use `context.WithCancel` for cleanup.
+
+4. **Configuration Management**  
+   Load configuration via environment variables or tools like Viper.
+
+5. **Structured Logging**  
+   Use log libraries like `zap` or `zerolog`, and log in structured JSON format if possible.
+
+6. **Metrics & Tracing**  
+   Expose Prometheus metrics and use OpenTelemetry for distributed tracing.
+
+7. **Panic Recovery**  
+   Recover from panics in goroutines and HTTP handlers to prevent crashes.
+
+8. **Security**  
+   - Validate user inputs.
+   - Sanitize file paths.
+   - Use HTTPS.
+   - Restrict access to debug endpoints like `net/http/pprof`.
+
+9. **Concurrency Control**  
+   Use goroutines responsibly. Leverage channels, `sync`, and `errgroup` to manage them.
+
+10. **Optimize Binary Size**  
+    Use `go build -ldflags="-s -w"` to reduce binary size. Optionally use `upx` to compress.
+
+---
+
+_Stick to these practices to maintain clean, efficient, and reliable Go applications from development to production._
+

@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/archivus/archivus/internal/app/middleware"
 	"github.com/archivus/archivus/internal/domain/repositories"
 	"github.com/archivus/archivus/internal/domain/services"
 	"github.com/archivus/archivus/internal/infrastructure/database/models"
@@ -13,6 +14,7 @@ import (
 
 // DocumentHandler handles HTTP requests for document operations
 type DocumentHandler struct {
+	*BaseHandler
 	documentService *services.DocumentService
 	userService     *services.UserService
 }
@@ -20,6 +22,7 @@ type DocumentHandler struct {
 // NewDocumentHandler creates a new document handler
 func NewDocumentHandler(documentService *services.DocumentService, userService *services.UserService) *DocumentHandler {
 	return &DocumentHandler{
+		BaseHandler:     NewBaseHandler(),
 		documentService: documentService,
 		userService:     userService,
 	}
@@ -114,24 +117,15 @@ func (h *DocumentHandler) RegisterRoutes(router *gin.RouterGroup) {
 // @Failure 500 {object} ErrorResponse
 // @Router /api/v1/documents/upload [post]
 func (h *DocumentHandler) UploadDocument(c *gin.Context) {
-	// Get user context from middleware
-	userCtx := GetUserContext(c)
-	if userCtx == nil {
-		c.JSON(http.StatusUnauthorized, ErrorResponse{
-			Error:   "unauthorized",
-			Message: "User not authenticated",
-		})
+	userCtx, ok := h.AuthenticateUser(c)
+	if !ok {
 		return
 	}
 
 	// Parse multipart form
 	file, header, err := c.Request.FormFile("file")
 	if err != nil {
-		c.JSON(http.StatusBadRequest, ErrorResponse{
-			Error:   "invalid_file",
-			Message: "No file uploaded or invalid file",
-			Details: err.Error(),
-		})
+		h.RespondBadRequest(c, "No file uploaded or invalid file", err.Error())
 		return
 	}
 	defer file.Close()
@@ -139,11 +133,7 @@ func (h *DocumentHandler) UploadDocument(c *gin.Context) {
 	// Parse form data
 	var req UploadDocumentRequest
 	if err := c.ShouldBind(&req); err != nil {
-		c.JSON(http.StatusBadRequest, ErrorResponse{
-			Error:   "invalid_request",
-			Message: "Invalid form data",
-			Details: err.Error(),
-		})
+		h.RespondBadRequest(c, "Invalid form data", err.Error())
 		return
 	}
 
@@ -250,21 +240,13 @@ func (h *DocumentHandler) UploadDocument(c *gin.Context) {
 // @Failure 404 {object} ErrorResponse
 // @Router /api/v1/documents/{id} [get]
 func (h *DocumentHandler) GetDocument(c *gin.Context) {
-	userCtx := GetUserContext(c)
-	if userCtx == nil {
-		c.JSON(http.StatusUnauthorized, ErrorResponse{
-			Error:   "unauthorized",
-			Message: "User not authenticated",
-		})
+	userCtx, ok := h.AuthenticateUser(c)
+	if !ok {
 		return
 	}
 
-	documentID, err := uuid.Parse(c.Param("id"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, ErrorResponse{
-			Error:   "invalid_document_id",
-			Message: "Invalid document ID format",
-		})
+	documentID, ok := h.ValidateUUID(c, "document ID", c.Param("id"))
+	if !ok {
 		return
 	}
 
@@ -314,22 +296,21 @@ func (h *DocumentHandler) GetDocument(c *gin.Context) {
 // @Success 200 {object} PaginatedResponse
 // @Router /api/v1/documents [get]
 func (h *DocumentHandler) ListDocuments(c *gin.Context) {
-	userCtx := GetUserContext(c)
-	if userCtx == nil {
-		c.JSON(http.StatusUnauthorized, ErrorResponse{
-			Error:   "unauthorized",
-			Message: "User not authenticated",
-		})
+	userCtx, ok := h.AuthenticateUser(c)
+	if !ok {
 		return
 	}
+
+	page, pageSize := h.ParsePagination(c)
+	sortBy, sortDesc := h.ParseSorting(c, "created_at")
 
 	// Parse query parameters
 	filters := repositories.DocumentFilters{
 		ListParams: repositories.ListParams{
-			Page:     getIntParam(c, "page", 1),
-			PageSize: getIntParam(c, "page_size", 20),
-			SortBy:   c.Query("sort_by"),
-			SortDesc: c.Query("sort_desc") == "true",
+			Page:     page,
+			PageSize: pageSize,
+			SortBy:   sortBy,
+			SortDesc: sortDesc,
 			Search:   c.Query("search"),
 		},
 	}
@@ -391,22 +372,14 @@ func (h *DocumentHandler) ListDocuments(c *gin.Context) {
 // @Success 200 {array} DocumentResponse
 // @Router /api/v1/documents/search [post]
 func (h *DocumentHandler) SearchDocuments(c *gin.Context) {
-	userCtx := GetUserContext(c)
-	if userCtx == nil {
-		c.JSON(http.StatusUnauthorized, ErrorResponse{
-			Error:   "unauthorized",
-			Message: "User not authenticated",
-		})
+	userCtx, ok := h.AuthenticateUser(c)
+	if !ok {
 		return
 	}
 
 	var req SearchRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, ErrorResponse{
-			Error:   "invalid_request",
-			Message: "Invalid search parameters",
-			Details: err.Error(),
-		})
+		h.RespondBadRequest(c, "Invalid search parameters", err.Error())
 		return
 	}
 
@@ -486,7 +459,7 @@ func (h *DocumentHandler) SearchDocuments(c *gin.Context) {
 // @Success 200 {object} DocumentResponse
 // @Router /api/v1/documents/{id} [put]
 func (h *DocumentHandler) UpdateDocument(c *gin.Context) {
-	userCtx := GetUserContext(c)
+	userCtx := middleware.GetUserContext(c)
 	if userCtx == nil {
 		c.JSON(http.StatusUnauthorized, ErrorResponse{
 			Error:   "unauthorized",
@@ -559,7 +532,7 @@ func (h *DocumentHandler) UpdateDocument(c *gin.Context) {
 // @Success 204
 // @Router /api/v1/documents/{id} [delete]
 func (h *DocumentHandler) DeleteDocument(c *gin.Context) {
-	userCtx := GetUserContext(c)
+	userCtx := middleware.GetUserContext(c)
 	if userCtx == nil {
 		c.JSON(http.StatusUnauthorized, ErrorResponse{
 			Error:   "unauthorized",
@@ -617,7 +590,7 @@ func (h *DocumentHandler) DeleteDocument(c *gin.Context) {
 // @Success 202 {object} map[string]string
 // @Router /api/v1/documents/{id}/process-financial [post]
 func (h *DocumentHandler) ProcessFinancialDocument(c *gin.Context) {
-	userCtx := GetUserContext(c)
+	userCtx := middleware.GetUserContext(c)
 	if userCtx == nil {
 		c.JSON(http.StatusUnauthorized, ErrorResponse{
 			Error:   "unauthorized",
@@ -672,7 +645,7 @@ func (h *DocumentHandler) ProcessFinancialDocument(c *gin.Context) {
 // @Success 200 {array} repositories.DocumentDuplicate
 // @Router /api/v1/documents/duplicates [get]
 func (h *DocumentHandler) FindDuplicates(c *gin.Context) {
-	userCtx := GetUserContext(c)
+	userCtx := middleware.GetUserContext(c)
 	if userCtx == nil {
 		c.JSON(http.StatusUnauthorized, ErrorResponse{
 			Error:   "unauthorized",
@@ -710,7 +683,7 @@ func (h *DocumentHandler) FindDuplicates(c *gin.Context) {
 // @Success 200 {array} DocumentResponse
 // @Router /api/v1/documents/expiring [get]
 func (h *DocumentHandler) GetExpiringDocuments(c *gin.Context) {
-	userCtx := GetUserContext(c)
+	userCtx := middleware.GetUserContext(c)
 	if userCtx == nil {
 		c.JSON(http.StatusUnauthorized, ErrorResponse{
 			Error:   "unauthorized",
@@ -744,7 +717,7 @@ func (h *DocumentHandler) GetExpiringDocuments(c *gin.Context) {
 
 // DownloadDocument serves the document file for download
 func (h *DocumentHandler) DownloadDocument(c *gin.Context) {
-	userCtx := GetUserContext(c)
+	userCtx := middleware.GetUserContext(c)
 	if userCtx == nil {
 		c.JSON(http.StatusUnauthorized, ErrorResponse{
 			Error:   "unauthorized",
@@ -804,7 +777,7 @@ func (h *DocumentHandler) PreviewDocument(c *gin.Context) {
 
 // Helper methods
 
-func (h *DocumentHandler) getDocumentPermissions(userCtx *UserContext, document *models.Document) map[string]bool {
+func (h *DocumentHandler) getDocumentPermissions(userCtx *middleware.UserContext, document *models.Document) map[string]bool {
 	permissions := map[string]bool{
 		"read":   true, // User can access document, so they can read
 		"update": false,

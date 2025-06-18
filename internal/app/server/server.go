@@ -31,6 +31,11 @@ type Server struct {
 type Handlers struct {
 	AuthHandler     *handlers.AuthHandler
 	DocumentHandler *handlers.DocumentHandler
+	UserHandler     *handlers.UserHandler
+	TenantHandler   *handlers.TenantHandler
+	FolderHandler   *handlers.FolderHandler
+	TagHandler      *handlers.TagHandler
+	CategoryHandler *handlers.CategoryHandler
 	// Add other handlers as they're created
 }
 
@@ -50,8 +55,13 @@ func NewServer(
 
 	// Create handlers
 	handlers := &Handlers{
-		AuthHandler:     handlers.NewAuthHandler(services.UserService, services.TenantService),
+		AuthHandler:     handlers.NewAuthHandler(services.UserService, services.TenantService, services.AuthService),
 		DocumentHandler: handlers.NewDocumentHandler(services.DocumentService, services.UserService),
+		UserHandler:     handlers.NewUserHandler(services.UserService, services.TenantService),
+		TenantHandler:   handlers.NewTenantHandler(services.TenantService, services.UserService),
+		FolderHandler:   handlers.NewFolderHandler(services.DocumentService, services.UserService),
+		TagHandler:      handlers.NewTagHandler(services.DocumentService, services.UserService),
+		CategoryHandler: handlers.NewCategoryHandler(services.DocumentService, services.UserService),
 	}
 
 	server := &Server{
@@ -75,6 +85,7 @@ type Services struct {
 	WorkflowService  *services.WorkflowService
 	AIService        *services.AIService
 	AnalyticsService *services.AnalyticsService
+	AuthService      services.SupabaseAuthService // Added auth service
 }
 
 // setupMiddleware configures all middleware
@@ -115,8 +126,13 @@ func (s *Server) setupRoutes() {
 	v1 := s.router.Group("/api/v1")
 	{
 		// Register handler routes
-		s.handlers.AuthHandler.RegisterRoutes(v1)
+		s.handlers.AuthHandler.SetupRoutes(v1)
 		s.handlers.DocumentHandler.RegisterRoutes(v1)
+		s.handlers.UserHandler.RegisterRoutes(v1)
+		s.handlers.TenantHandler.RegisterRoutes(v1)
+		s.handlers.FolderHandler.RegisterRoutes(v1)
+		s.handlers.TagHandler.RegisterRoutes(v1)
+		s.handlers.CategoryHandler.RegisterRoutes(v1)
 
 		// Add other handler routes as they're created
 		// s.handlers.WorkflowHandler.RegisterRoutes(v1)

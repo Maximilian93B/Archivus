@@ -22,14 +22,27 @@ func main() {
 	// Initialize logger
 	logger := logger.New()
 
-	// Load configuration
-	cfg, err := config.Load()
-	if err != nil {
-		log.Fatalf("Failed to load config: %v", err)
+	// Determine database URL - prioritize TEST environment variable
+	var databaseURL string
+	if testURL := os.Getenv("DATABASE_URL_TEST"); testURL != "" {
+		databaseURL = testURL
+		logger.Info("Using test database URL from environment variable")
+	} else {
+		// Load configuration for normal operation
+		cfg, err := config.Load()
+		if err != nil {
+			log.Fatalf("Failed to load config: %v", err)
+		}
+		databaseURL = cfg.GetDatabaseURL()
+		logger.Info("Using database URL from configuration")
+	}
+
+	if databaseURL == "" {
+		log.Fatalf("No database URL found. Set DATABASE_URL_TEST environment variable or configure in .env file")
 	}
 
 	// Connect to database
-	db, err := database.New(cfg.GetDatabaseURL())
+	db, err := database.New(databaseURL)
 	if err != nil {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
@@ -83,7 +96,7 @@ func runMigrations(db *database.DB, logger *logger.Logger) {
 
 func rollbackMigrations(db *database.DB, logger *logger.Logger) {
 	logger.Info("Rolling back migrations...")
-	
+
 	// Note: GORM doesn't support rollbacks out of the box
 	// This is a simplified version - in production you might want to use a migration tool like golang-migrate
 	logger.Warn("Rollback not implemented - use 'reset' to recreate schema")
@@ -125,7 +138,7 @@ func resetDatabase(db *database.DB, logger *logger.Logger) {
 
 	// Recreate all tables
 	runMigrations(db, logger)
-	
+
 	logger.Info("Database reset completed")
 }
 
@@ -288,4 +301,4 @@ func createIndexes(db *database.DB) error {
 	}
 
 	return nil
-} 
+}

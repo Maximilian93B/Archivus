@@ -1,0 +1,59 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Test Database
+  postgres-test:
+    image: pgvector/pgvector:pg16
+    container_name: archivus-postgres-test
+    environment:
+      POSTGRES_DB: archivus_test
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5433:5432"  # Different port to avoid conflicts
+    tmpfs:
+      - /var/lib/postgresql/data  # Use tmpfs for faster test execution
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # Test Runner
+  test-runner:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    container_name: archivus-test-runner
+    environment:
+      - DATABASE_URL_TEST=postgres://postgres:postgres@postgres-test:5432/archivus_test?sslmode=disable
+      - CGO_ENABLED=1
+      - GOOS=linux
+    depends_on:
+      postgres-test:
+        condition: service_healthy
+    volumes:
+      - .:/app
+    working_dir: /app
+    command: >
+      sh -c "
+        echo '🧪 Starting Archivus Test Suite...' &&
+        echo '✅ Database URL: postgres://postgres:postgres@postgres-test:5432/archivus_test' &&
+        go mod download &&
+        echo '📦 Dependencies downloaded' &&
+        echo '🔄 Running Database Migrations...' &&
+        go run -tags=postgres cmd/migrate/main.go up &&
+        echo '🌱 Seeding Database with Test Data...' &&
+        go run -tags=postgres cmd/migrate/main.go seed &&
+        echo '📊 Checking Migration Status...' &&
+        go run -tags=postgres cmd/migrate/main.go status &&
+        echo '🏃 Running Repository Tests...' &&
+        go test -v -tags=postgres ./internal/infrastructure/repositories/postgresql/... &&
+        echo '🎯 Running Integration Tests...' &&
+        go run -tags=postgres test_runner.go &&
+        echo '🎉 All tests completed!'
+      "
+
+networks:
+  default:
+    name: archivus-test-network 

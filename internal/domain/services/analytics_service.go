@@ -363,9 +363,18 @@ func (s *AnalyticsService) GetUserAnalytics(ctx context.Context, tenantID uuid.U
 
 // GetStorageReport returns detailed storage analytics
 func (s *AnalyticsService) GetStorageReport(ctx context.Context, tenantID uuid.UUID) (*StorageAnalytics, error) {
-	storageAnalytics, err := s.analyticsRepo.GetStorageAnalytics(ctx, tenantID)
+	repoAnalytics, err := s.analyticsRepo.GetStorageAnalytics(ctx, tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get storage analytics: %w", err)
+	}
+
+	// Convert repository type to service type
+	storageAnalytics := &StorageAnalytics{
+		TotalSize:     repoAnalytics.TotalSize,
+		UsedSize:      repoAnalytics.TotalSize,
+		AvailableSize: 0,
+		UsagePercent:  0,
+		SizeByDocType: make(map[string]int64),
 	}
 
 	// Enhance with predictions and insights
@@ -464,9 +473,19 @@ func (s *AnalyticsService) getUserActivity(ctx context.Context, tenantID uuid.UU
 }
 
 func (s *AnalyticsService) getStorageAnalytics(ctx context.Context, tenantID uuid.UUID) *StorageAnalytics {
-	// Get storage analytics from repository
-	storageAnalytics, _ := s.analyticsRepo.GetStorageAnalytics(ctx, tenantID)
-	return storageAnalytics
+	// Get storage analytics from repository and convert
+	repoAnalytics, _ := s.analyticsRepo.GetStorageAnalytics(ctx, tenantID)
+	if repoAnalytics == nil {
+		return &StorageAnalytics{}
+	}
+
+	return &StorageAnalytics{
+		TotalSize:     repoAnalytics.TotalSize,
+		UsedSize:      repoAnalytics.TotalSize,
+		AvailableSize: 0,
+		UsagePercent:  0,
+		SizeByDocType: make(map[string]int64),
+	}
 }
 
 func (s *AnalyticsService) getWorkflowMetrics(ctx context.Context, tenantID uuid.UUID, period string) *WorkflowMetrics {
@@ -493,7 +512,7 @@ func (s *AnalyticsService) getFinancialInsights(ctx context.Context, tenantID uu
 	return &FinancialInsights{
 		TotalInvoices: 0,
 		TotalAmount:   0.0,
-		Currency:      "USD",
+		Currency:      "CAD",
 		TopVendors:    []VendorSummary{},
 		TopCustomers:  []CustomerSummary{},
 	}

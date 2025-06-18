@@ -14,6 +14,7 @@ import (
 
 // AuthHandler handles authentication and authorization with Supabase
 type AuthHandler struct {
+	*BaseHandler
 	userService   *services.UserService
 	tenantService *services.TenantService
 	supabaseAuth  services.SupabaseAuthService
@@ -26,6 +27,7 @@ func NewAuthHandler(
 	supabaseAuth services.SupabaseAuthService,
 ) *AuthHandler {
 	return &AuthHandler{
+		BaseHandler:   NewBaseHandler(),
 		userService:   userService,
 		tenantService: tenantService,
 		supabaseAuth:  supabaseAuth,
@@ -60,13 +62,13 @@ func (h *AuthHandler) SetupRoutes(router *gin.RouterGroup) {
 func (h *AuthHandler) Register(c *gin.Context) {
 	var req RegisterRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		h.respondError(c, http.StatusBadRequest, "Invalid request format", err)
+		h.RespondBadRequest(c, "Invalid request format", err.Error())
 		return
 	}
 
 	// Validate required fields
 	if err := h.validateRegistrationRequest(&req); err != nil {
-		h.respondError(c, http.StatusBadRequest, err.Error(), nil)
+		h.RespondBadRequest(c, err.Error())
 		return
 	}
 
@@ -74,7 +76,7 @@ func (h *AuthHandler) Register(c *gin.Context) {
 	tenantSubdomain := h.getTenantSubdomain(c)
 	tenant, err := h.tenantService.GetTenantBySubdomain(c.Request.Context(), tenantSubdomain)
 	if err != nil {
-		h.respondError(c, http.StatusBadRequest, "Invalid tenant", err)
+		h.RespondBadRequest(c, "Invalid tenant", err.Error())
 		return
 	}
 
@@ -95,16 +97,16 @@ func (h *AuthHandler) Register(c *gin.Context) {
 	user, err := h.userService.CreateUser(c.Request.Context(), params)
 	if err != nil {
 		if strings.Contains(err.Error(), "already exists") {
-			h.respondError(c, http.StatusConflict, "User already exists", err)
+			h.RespondConflict(c, "User already exists")
 		} else {
-			h.respondError(c, http.StatusBadRequest, "Failed to create user", err)
+			h.RespondBadRequest(c, "Failed to create user", err.Error())
 		}
 		return
 	}
 
 	// Return response
 	response := convertUserToResponse(user)
-	c.JSON(http.StatusCreated, response)
+	h.RespondCreated(c, response)
 }
 
 // Login handles user authentication with Supabase
@@ -121,20 +123,20 @@ func (h *AuthHandler) Register(c *gin.Context) {
 func (h *AuthHandler) Login(c *gin.Context) {
 	var req LoginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		h.respondError(c, http.StatusBadRequest, "Invalid request format", err)
+		h.RespondBadRequest(c, "Invalid request format", err.Error())
 		return
 	}
 
 	// Validate required fields
 	if req.Email == "" || req.Password == "" {
-		h.respondError(c, http.StatusBadRequest, "Email and password are required", nil)
+		h.RespondBadRequest(c, "Email and password are required")
 		return
 	}
 
 	// Get tenant subdomain from request
 	tenantSubdomain := h.getTenantSubdomain(c)
 	if tenantSubdomain == "" {
-		h.respondError(c, http.StatusBadRequest, "Tenant subdomain is required", nil)
+		h.RespondBadRequest(c, "Tenant subdomain is required")
 		return
 	}
 
@@ -151,7 +153,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	// Authenticate using Supabase
 	result, err := h.userService.Login(c.Request.Context(), loginParams)
 	if err != nil {
-		h.respondError(c, http.StatusUnauthorized, "Authentication failed", err)
+		h.RespondUnauthorized(c, "Authentication failed")
 		return
 	}
 
@@ -172,7 +174,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		ExpiresAt:    result.ExpiresAt.Unix(),
 	}
 
-	c.JSON(http.StatusOK, response)
+	h.RespondSuccess(c, response)
 }
 
 // ValidateToken validates a Supabase access token
@@ -436,17 +438,7 @@ func (h *AuthHandler) validateRegistrationRequest(req *RegisterRequest) error {
 }
 
 func (h *AuthHandler) respondError(c *gin.Context, statusCode int, message string, err error) {
-	response := ErrorResponse{
-		Error:   message,
-		Message: message,
-		Status:  statusCode,
-	}
-
-	if err != nil {
-		response.Details = err.Error()
-	}
-
-	c.JSON(statusCode, response)
+	h.RespondError(c, statusCode, "auth_error", message, err.Error())
 }
 
 func convertUserToResponse(user *models.User) *UserResponse {
