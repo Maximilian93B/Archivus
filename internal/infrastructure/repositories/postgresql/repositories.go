@@ -1,6 +1,9 @@
 package postgresql
 
 import (
+	"context"
+	"fmt"
+
 	"github.com/archivus/archivus/internal/domain/repositories"
 	"github.com/archivus/archivus/internal/infrastructure/database"
 )
@@ -20,6 +23,9 @@ type Repositories struct {
 	ShareRepo        repositories.ShareRepository
 	AnalyticsRepo    repositories.AnalyticsRepository
 	NotificationRepo repositories.NotificationRepository
+
+	// Internal reference to database for health checks
+	db *database.DB
 }
 
 // NewRepositories creates a new repositories container
@@ -38,5 +44,20 @@ func NewRepositories(db *database.DB) *Repositories {
 		ShareRepo:        NewShareRepository(db),
 		AnalyticsRepo:    NewAnalyticsRepository(db),
 		NotificationRepo: NewNotificationRepository(db),
+		db:               db,
 	}
+}
+
+// HealthCheck verifies database connectivity
+func (r *Repositories) HealthCheck(ctx context.Context) error {
+	sqlDB, err := r.db.DB.DB()
+	if err != nil {
+		return fmt.Errorf("failed to get underlying sql.DB: %w", err)
+	}
+
+	if err := sqlDB.PingContext(ctx); err != nil {
+		return fmt.Errorf("database ping failed: %w", err)
+	}
+
+	return nil
 }

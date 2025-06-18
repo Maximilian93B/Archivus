@@ -173,7 +173,21 @@ func (r *FolderRepository) Move(ctx context.Context, folderID, newParentID uuid.
 		return fmt.Errorf("failed to get new parent folder: %w", err)
 	}
 
-	// Update folder's parent and recalculate path and level
+	// Prevent circular references
+	if folderID == newParentID {
+		tx.Rollback()
+		return fmt.Errorf("cannot move folder to itself")
+	}
+
+	// Check if new parent is a descendant of the folder being moved
+	currentPath := folder.Path
+	if strings.HasPrefix(newParent.Path, currentPath+"/") {
+		tx.Rollback()
+		return fmt.Errorf("cannot move folder to its own descendant")
+	}
+
+	// Calculate new path and level
+	oldPath := folder.Path
 	newPath := fmt.Sprintf("%s/%s", newParent.Path, folder.Name)
 	newLevel := newParent.Level + 1
 
@@ -189,8 +203,16 @@ func (r *FolderRepository) Move(ctx context.Context, folderID, newParentID uuid.
 		return fmt.Errorf("failed to move folder: %w", result.Error)
 	}
 
-	// TODO: Update all subfolders' paths and levels recursively
-	// This is a complex operation that would require recursive updates
+	// Update all subfolders' paths recursively
+	if err := tx.Exec(`
+		UPDATE folders 
+		SET path = REPLACE(path, ?, ?), 
+		    level = level + ?
+		WHERE tenant_id = ? AND path LIKE ?`,
+		oldPath, newPath, newLevel-folder.Level, folder.TenantID, oldPath+"/%").Error; err != nil {
+		tx.Rollback()
+		return fmt.Errorf("failed to update subfolder paths: %w", err)
+	}
 
 	return tx.Commit().Error
 }

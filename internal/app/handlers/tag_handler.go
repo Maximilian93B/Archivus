@@ -1,9 +1,6 @@
 package handlers
 
 import (
-	"net/http"
-	"strconv"
-
 	"github.com/archivus/archivus/internal/domain/services"
 	"github.com/archivus/archivus/internal/infrastructure/database/models"
 	"github.com/gin-gonic/gin"
@@ -12,6 +9,7 @@ import (
 
 // TagHandler handles tag management operations
 type TagHandler struct {
+	*BaseHandler
 	documentService *services.DocumentService
 	userService     *services.UserService
 }
@@ -22,6 +20,7 @@ func NewTagHandler(
 	userService *services.UserService,
 ) *TagHandler {
 	return &TagHandler{
+		BaseHandler:     NewBaseHandler(),
 		documentService: documentService,
 		userService:     userService,
 	}
@@ -111,45 +110,24 @@ type PopularTagsResponse struct {
 // @Failure 409 {object} ErrorResponse
 // @Router /tags [post]
 func (h *TagHandler) CreateTag(c *gin.Context) {
-	userCtx := getUserContextFromGin(c)
-	if userCtx == nil {
-		c.JSON(http.StatusUnauthorized, ErrorResponse{
-			Error:   "unauthorized",
-			Message: "User context not found",
-		})
+	userCtx, ok := h.AuthenticateUser(c)
+	if !ok {
 		return
 	}
 
 	var req CreateTagRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, ErrorResponse{
-			Error:   "invalid_request",
-			Message: "Invalid request format",
-			Details: err.Error(),
-		})
+		h.RespondBadRequest(c, "Invalid request format", err.Error())
 		return
 	}
 
-	// Create tag
 	tag, err := h.documentService.CreateTag(c.Request.Context(), userCtx.TenantID, userCtx.UserID, req.Name, req.Color)
 	if err != nil {
-		if err.Error() == "tag with name '"+req.Name+"' already exists" {
-			c.JSON(http.StatusConflict, ErrorResponse{
-				Error:   "tag_exists",
-				Message: "A tag with this name already exists",
-			})
-			return
-		}
-
-		c.JSON(http.StatusInternalServerError, ErrorResponse{
-			Error:   "create_failed",
-			Message: "Failed to create tag",
-			Details: err.Error(),
-		})
+		h.handleTagError(c, err, req.Name)
 		return
 	}
 
-	c.JSON(http.StatusCreated, h.convertToTagResponse(tag))
+	h.RespondCreated(c, h.convertToTagResponse(tag))
 }
 
 // ListTags lists all tags for the tenant
@@ -165,71 +143,26 @@ func (h *TagHandler) CreateTag(c *gin.Context) {
 // @Failure 401 {object} ErrorResponse
 // @Router /tags [get]
 func (h *TagHandler) ListTags(c *gin.Context) {
-	userCtx := getUserContextFromGin(c)
-	if userCtx == nil {
-		c.JSON(http.StatusUnauthorized, ErrorResponse{
-			Error:   "unauthorized",
-			Message: "User context not found",
-		})
+	userCtx, ok := h.AuthenticateUser(c)
+	if !ok {
 		return
 	}
 
-	// Parse query parameters
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	perPage, _ := strconv.Atoi(c.DefaultQuery("per_page", "20"))
-	if page < 1 {
-		page = 1
-	}
-	if perPage < 1 || perPage > 100 {
-		perPage = 20
-	}
-
-	sortBy := c.DefaultQuery("sort_by", "usage_count")
-	sortDesc := c.DefaultQuery("sort_desc", "true") == "true"
+	page, pageSize := h.ParsePagination(c)
+	sortBy, sortDesc := h.ParseSorting(c, "usage_count")
 
 	// Get tags from service
 	tags, err := h.documentService.ListTags(c.Request.Context(), userCtx.TenantID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, ErrorResponse{
-			Error:   "list_failed",
-			Message: "Failed to list tags",
-			Details: err.Error(),
-		})
+		h.RespondInternalError(c, "Failed to list tags", err.Error())
 		return
 	}
 
-	// Sort tags (simple in-memory sorting)
+	// Sort tags (will be moved to service layer later)
 	h.sortTags(tags, sortBy, sortDesc)
 
-	// Convert to response format
-	var tagResponses []TagResponse
-	for _, tag := range tags {
-		tagResponses = append(tagResponses, h.convertToTagResponse(&tag))
-	}
-
-	// Apply pagination
-	total := len(tagResponses)
-	startIdx := (page - 1) * perPage
-	endIdx := startIdx + perPage
-	if startIdx > total {
-		startIdx = total
-	}
-	if endIdx > total {
-		endIdx = total
-	}
-
-	paginatedTags := tagResponses[startIdx:endIdx]
-	totalPages := (total + perPage - 1) / perPage
-
-	response := TagListResponse{
-		Tags:       paginatedTags,
-		Total:      total,
-		Page:       page,
-		PerPage:    perPage,
-		TotalPages: totalPages,
-	}
-
-	c.JSON(http.StatusOK, response)
+	response := h.buildTagListResponse(tags, page, pageSize)
+	h.RespondSuccess(c, response)
 }
 
 // GetTag retrieves a specific tag
@@ -244,35 +177,24 @@ func (h *TagHandler) ListTags(c *gin.Context) {
 // @Failure 404 {object} ErrorResponse
 // @Router /tags/{id} [get]
 func (h *TagHandler) GetTag(c *gin.Context) {
-	userCtx := getUserContextFromGin(c)
-	if userCtx == nil {
-		c.JSON(http.StatusUnauthorized, ErrorResponse{
-			Error:   "unauthorized",
-			Message: "User context not found",
-		})
+	userCtx, ok := h.AuthenticateUser(c)
+	if !ok {
 		return
 	}
 
-	tagID, err := uuid.Parse(c.Param("id"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, ErrorResponse{
-			Error:   "invalid_tag_id",
-			Message: "Invalid tag ID format",
-		})
+	tagID, ok := h.ValidateUUID(c, "tag ID", c.Param("id"))
+	if !ok {
 		return
 	}
 
 	// Get tag
 	tag, err := h.documentService.GetTag(c.Request.Context(), tagID, userCtx.TenantID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, ErrorResponse{
-			Error:   "tag_not_found",
-			Message: "Tag not found",
-		})
+		h.RespondNotFound(c, "Tag not found")
 		return
 	}
 
-	c.JSON(http.StatusOK, h.convertToTagResponse(tag))
+	h.RespondSuccess(c, h.convertToTagResponse(tag))
 }
 
 // UpdateTag updates an existing tag
@@ -290,31 +212,19 @@ func (h *TagHandler) GetTag(c *gin.Context) {
 // @Failure 409 {object} ErrorResponse
 // @Router /tags/{id} [put]
 func (h *TagHandler) UpdateTag(c *gin.Context) {
-	userCtx := getUserContextFromGin(c)
-	if userCtx == nil {
-		c.JSON(http.StatusUnauthorized, ErrorResponse{
-			Error:   "unauthorized",
-			Message: "User context not found",
-		})
+	userCtx, ok := h.AuthenticateUser(c)
+	if !ok {
 		return
 	}
 
-	tagID, err := uuid.Parse(c.Param("id"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, ErrorResponse{
-			Error:   "invalid_tag_id",
-			Message: "Invalid tag ID format",
-		})
+	tagID, ok := h.ValidateUUID(c, "tag ID", c.Param("id"))
+	if !ok {
 		return
 	}
 
 	var req UpdateTagRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, ErrorResponse{
-			Error:   "invalid_request",
-			Message: "Invalid request format",
-			Details: err.Error(),
-		})
+		h.RespondBadRequest(c, "Invalid request format", err.Error())
 		return
 	}
 
@@ -331,29 +241,18 @@ func (h *TagHandler) UpdateTag(c *gin.Context) {
 	tag, err := h.documentService.UpdateTag(c.Request.Context(), tagID, userCtx.TenantID, updates, userCtx.UserID)
 	if err != nil {
 		if err.Error() == "tag not found" {
-			c.JSON(http.StatusNotFound, ErrorResponse{
-				Error:   "tag_not_found",
-				Message: "Tag not found",
-			})
+			h.RespondNotFound(c, "Tag not found")
 			return
 		}
-		if err.Error() == "tag with name '"+*req.Name+"' already exists" {
-			c.JSON(http.StatusConflict, ErrorResponse{
-				Error:   "tag_exists",
-				Message: "A tag with this name already exists",
-			})
+		if req.Name != nil && err.Error() == "tag with name '"+*req.Name+"' already exists" {
+			h.RespondConflict(c, "A tag with this name already exists")
 			return
 		}
-
-		c.JSON(http.StatusInternalServerError, ErrorResponse{
-			Error:   "update_failed",
-			Message: "Failed to update tag",
-			Details: err.Error(),
-		})
+		h.RespondInternalError(c, "Failed to update tag", err.Error())
 		return
 	}
 
-	c.JSON(http.StatusOK, h.convertToTagResponse(tag))
+	h.RespondSuccess(c, h.convertToTagResponse(tag))
 }
 
 // DeleteTag deletes a tag
@@ -367,44 +266,28 @@ func (h *TagHandler) UpdateTag(c *gin.Context) {
 // @Failure 404 {object} ErrorResponse
 // @Router /tags/{id} [delete]
 func (h *TagHandler) DeleteTag(c *gin.Context) {
-	userCtx := getUserContextFromGin(c)
-	if userCtx == nil {
-		c.JSON(http.StatusUnauthorized, ErrorResponse{
-			Error:   "unauthorized",
-			Message: "User context not found",
-		})
+	userCtx, ok := h.AuthenticateUser(c)
+	if !ok {
 		return
 	}
 
-	tagID, err := uuid.Parse(c.Param("id"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, ErrorResponse{
-			Error:   "invalid_tag_id",
-			Message: "Invalid tag ID format",
-		})
+	tagID, ok := h.ValidateUUID(c, "tag ID", c.Param("id"))
+	if !ok {
 		return
 	}
 
 	// Delete tag
-	err = h.documentService.DeleteTag(c.Request.Context(), tagID, userCtx.TenantID, userCtx.UserID)
+	err := h.documentService.DeleteTag(c.Request.Context(), tagID, userCtx.TenantID, userCtx.UserID)
 	if err != nil {
 		if err.Error() == "tag not found" {
-			c.JSON(http.StatusNotFound, ErrorResponse{
-				Error:   "tag_not_found",
-				Message: "Tag not found",
-			})
+			h.RespondNotFound(c, "Tag not found")
 			return
 		}
-
-		c.JSON(http.StatusInternalServerError, ErrorResponse{
-			Error:   "delete_failed",
-			Message: "Failed to delete tag",
-			Details: err.Error(),
-		})
+		h.RespondInternalError(c, "Failed to delete tag", err.Error())
 		return
 	}
 
-	c.JSON(http.StatusOK, SuccessResponse{
+	h.RespondSuccess(c, SuccessResponse{
 		Message: "Tag deleted successfully",
 	})
 }
@@ -419,29 +302,21 @@ func (h *TagHandler) DeleteTag(c *gin.Context) {
 // @Failure 401 {object} ErrorResponse
 // @Router /tags/popular [get]
 func (h *TagHandler) GetPopularTags(c *gin.Context) {
-	userCtx := getUserContextFromGin(c)
-	if userCtx == nil {
-		c.JSON(http.StatusUnauthorized, ErrorResponse{
-			Error:   "unauthorized",
-			Message: "User context not found",
-		})
+	userCtx, ok := h.AuthenticateUser(c)
+	if !ok {
 		return
 	}
 
 	// Parse limit parameter
-	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
-	if limit < 1 || limit > 100 {
-		limit = 20
+	limit := getIntParam(c, "limit", 20)
+	if limit > 100 {
+		limit = 100
 	}
 
 	// Get popular tags
 	tags, err := h.documentService.GetPopularTags(c.Request.Context(), userCtx.TenantID, limit)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, ErrorResponse{
-			Error:   "fetch_failed",
-			Message: "Failed to fetch popular tags",
-			Details: err.Error(),
-		})
+		h.RespondInternalError(c, "Failed to fetch popular tags", err.Error())
 		return
 	}
 
@@ -456,7 +331,7 @@ func (h *TagHandler) GetPopularTags(c *gin.Context) {
 		Count: len(tagResponses),
 	}
 
-	c.JSON(http.StatusOK, response)
+	h.RespondSuccess(c, response)
 }
 
 // GetTagSuggestions gets AI-powered tag suggestions
@@ -471,38 +346,27 @@ func (h *TagHandler) GetPopularTags(c *gin.Context) {
 // @Failure 401 {object} ErrorResponse
 // @Router /tags/suggestions [get]
 func (h *TagHandler) GetTagSuggestions(c *gin.Context) {
-	userCtx := getUserContextFromGin(c)
-	if userCtx == nil {
-		c.JSON(http.StatusUnauthorized, ErrorResponse{
-			Error:   "unauthorized",
-			Message: "User context not found",
-		})
+	userCtx, ok := h.AuthenticateUser(c)
+	if !ok {
 		return
 	}
 
 	// Parse query parameters
 	text := c.Query("text")
 	if text == "" {
-		c.JSON(http.StatusBadRequest, ErrorResponse{
-			Error:   "missing_text",
-			Message: "Text parameter is required",
-		})
+		h.RespondBadRequest(c, "Text parameter is required")
 		return
 	}
 
-	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "10"))
-	if limit < 1 || limit > 50 {
-		limit = 10
+	limit := getIntParam(c, "limit", 10)
+	if limit > 50 {
+		limit = 50
 	}
 
 	// Get tag suggestions
 	suggestions, err := h.documentService.GetTagSuggestions(c.Request.Context(), userCtx.TenantID, text, limit)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, ErrorResponse{
-			Error:   "suggestions_failed",
-			Message: "Failed to generate tag suggestions",
-			Details: err.Error(),
-		})
+		h.RespondInternalError(c, "Failed to generate tag suggestions", err.Error())
 		return
 	}
 
@@ -511,7 +375,7 @@ func (h *TagHandler) GetTagSuggestions(c *gin.Context) {
 		Count:       len(suggestions),
 	}
 
-	c.JSON(http.StatusOK, response)
+	h.RespondSuccess(c, response)
 }
 
 // Helper Methods
@@ -567,5 +431,45 @@ func (h *TagHandler) sortTags(tags []models.Tag, sortBy string, sortDesc bool) {
 				tags[j], tags[j+1] = tags[j+1], tags[j]
 			}
 		}
+	}
+}
+
+// handleTagError handles tag-specific errors with appropriate responses
+func (h *TagHandler) handleTagError(c *gin.Context, err error, tagName string) {
+	if err.Error() == "tag with name '"+tagName+"' already exists" {
+		h.RespondConflict(c, "A tag with this name already exists")
+		return
+	}
+	h.RespondInternalError(c, "Failed to create tag", err.Error())
+}
+
+// buildTagListResponse builds a paginated tag list response
+func (h *TagHandler) buildTagListResponse(tags []models.Tag, page, pageSize int) TagListResponse {
+	// Convert to response format
+	var tagResponses []TagResponse
+	for _, tag := range tags {
+		tagResponses = append(tagResponses, h.convertToTagResponse(&tag))
+	}
+
+	// Apply pagination
+	total := len(tagResponses)
+	startIdx := (page - 1) * pageSize
+	endIdx := startIdx + pageSize
+	if startIdx > total {
+		startIdx = total
+	}
+	if endIdx > total {
+		endIdx = total
+	}
+
+	paginatedTags := tagResponses[startIdx:endIdx]
+	totalPages := (total + pageSize - 1) / pageSize
+
+	return TagListResponse{
+		Tags:       paginatedTags,
+		Total:      total,
+		Page:       page,
+		PerPage:    pageSize,
+		TotalPages: totalPages,
 	}
 }

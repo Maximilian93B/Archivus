@@ -2,7 +2,6 @@ package handlers
 
 import (
 	"net/http"
-	"strconv"
 
 	"github.com/archivus/archivus/internal/app/middleware"
 	"github.com/archivus/archivus/internal/domain/repositories"
@@ -14,6 +13,7 @@ import (
 
 // UserHandler handles user management operations
 type UserHandler struct {
+	*BaseHandler
 	userService   *services.UserService
 	tenantService *services.TenantService
 }
@@ -24,6 +24,7 @@ func NewUserHandler(
 	tenantService *services.TenantService,
 ) *UserHandler {
 	return &UserHandler{
+		BaseHandler:   NewBaseHandler(),
 		userService:   userService,
 		tenantService: tenantService,
 	}
@@ -135,26 +136,19 @@ type UserListResponse struct {
 // @Failure 401 {object} ErrorResponse
 // @Router /users/profile [get]
 func (h *UserHandler) GetProfile(c *gin.Context) {
-	userCtx := getUserContext(c)
-	if userCtx == nil {
-		c.JSON(http.StatusUnauthorized, ErrorResponse{
-			Error:   "unauthorized",
-			Message: "User context not found",
-		})
+	userCtx, ok := h.AuthenticateUser(c)
+	if !ok {
 		return
 	}
 
 	// Get user profile through UserService
 	profile, err := h.userService.GetUserProfile(c.Request.Context(), userCtx.UserID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, ErrorResponse{
-			Error:   "user_not_found",
-			Message: "User not found",
-		})
+		h.RespondNotFound(c, "User not found")
 		return
 	}
 
-	c.JSON(http.StatusOK, convertToUserProfileResponse(profile.User))
+	h.RespondSuccess(c, convertToUserProfileResponse(profile.User))
 }
 
 // UpdateProfile updates the current user's profile
@@ -169,22 +163,14 @@ func (h *UserHandler) GetProfile(c *gin.Context) {
 // @Failure 401 {object} ErrorResponse
 // @Router /users/profile [put]
 func (h *UserHandler) UpdateProfile(c *gin.Context) {
-	userCtx := getUserContext(c)
-	if userCtx == nil {
-		c.JSON(http.StatusUnauthorized, ErrorResponse{
-			Error:   "unauthorized",
-			Message: "User context not found",
-		})
+	userCtx, ok := h.AuthenticateUser(c)
+	if !ok {
 		return
 	}
 
 	var req UpdateProfileRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, ErrorResponse{
-			Error:   "invalid_request",
-			Message: "Invalid request format",
-			Details: err.Error(),
-		})
+		h.RespondBadRequest(c, "Invalid request format", err.Error())
 		return
 	}
 
@@ -199,15 +185,11 @@ func (h *UserHandler) UpdateProfile(c *gin.Context) {
 	// Update user through UserService
 	updatedUser, err := h.userService.UpdateUser(c.Request.Context(), userCtx.UserID, updates, userCtx.UserID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, ErrorResponse{
-			Error:   "update_failed",
-			Message: "Failed to update user profile",
-			Details: err.Error(),
-		})
+		h.RespondInternalError(c, "Failed to update user profile", err.Error())
 		return
 	}
 
-	c.JSON(http.StatusOK, convertToUserProfileResponse(updatedUser))
+	h.RespondSuccess(c, convertToUserProfileResponse(updatedUser))
 }
 
 // ChangePassword changes the current user's password
@@ -222,62 +204,40 @@ func (h *UserHandler) UpdateProfile(c *gin.Context) {
 // @Failure 401 {object} ErrorResponse
 // @Router /users/change-password [post]
 func (h *UserHandler) ChangePassword(c *gin.Context) {
-	userCtx := getUserContext(c)
-	if userCtx == nil {
-		c.JSON(http.StatusUnauthorized, ErrorResponse{
-			Error:   "unauthorized",
-			Message: "User context not found",
-		})
+	userCtx, ok := h.AuthenticateUser(c)
+	if !ok {
 		return
 	}
 
 	var req ChangePasswordRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, ErrorResponse{
-			Error:   "invalid_request",
-			Message: "Invalid request format",
-			Details: err.Error(),
-		})
+		h.RespondBadRequest(c, "Invalid request format", err.Error())
 		return
 	}
 
 	// Get access token from context
 	accessToken, exists := c.Get("access_token")
 	if !exists {
-		c.JSON(http.StatusUnauthorized, ErrorResponse{
-			Error:   "access_token_missing",
-			Message: "Access token not found",
-		})
+		h.RespondUnauthorized(c, "Access token not found")
 		return
 	}
 
-	// Change password through user service (correct signature)
+	// Change password through user service
 	err := h.userService.ChangePassword(c.Request.Context(), userCtx.UserID, accessToken.(string), req.NewPassword)
 	if err != nil {
 		if err == services.ErrInvalidCredentials {
-			c.JSON(http.StatusBadRequest, ErrorResponse{
-				Error:   "invalid_current_password",
-				Message: "Current password is incorrect",
-			})
+			h.RespondBadRequest(c, "Current password is incorrect")
 			return
 		}
 		if err == services.ErrWeakPassword {
-			c.JSON(http.StatusBadRequest, ErrorResponse{
-				Error:   "weak_password",
-				Message: "New password does not meet security requirements",
-			})
+			h.RespondBadRequest(c, "New password does not meet security requirements")
 			return
 		}
-
-		c.JSON(http.StatusInternalServerError, ErrorResponse{
-			Error:   "password_change_failed",
-			Message: "Failed to change password",
-			Details: err.Error(),
-		})
+		h.RespondInternalError(c, "Failed to change password", err.Error())
 		return
 	}
 
-	c.JSON(http.StatusOK, SuccessResponse{
+	h.RespondSuccess(c, SuccessResponse{
 		Message: "Password changed successfully",
 	})
 }
@@ -297,25 +257,12 @@ func (h *UserHandler) ChangePassword(c *gin.Context) {
 // @Failure 403 {object} ErrorResponse
 // @Router /users [get]
 func (h *UserHandler) ListUsers(c *gin.Context) {
-	userCtx := getUserContext(c)
-	if userCtx == nil {
-		c.JSON(http.StatusUnauthorized, ErrorResponse{
-			Error:   "unauthorized",
-			Message: "User context not found",
-		})
+	userCtx, ok := h.AuthenticateUser(c)
+	if !ok {
 		return
 	}
 
-	// Parse query parameters
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	perPage, _ := strconv.Atoi(c.DefaultQuery("per_page", "20"))
-	if page < 1 {
-		page = 1
-	}
-	if perPage < 1 || perPage > 100 {
-		perPage = 20
-	}
-
+	page, pageSize := h.ParsePagination(c)
 	search := c.Query("search")
 	sortBy := c.Query("sort_by")
 	sortDesc := c.Query("sort_desc") == "true"
@@ -323,7 +270,7 @@ func (h *UserHandler) ListUsers(c *gin.Context) {
 	// Create list parameters using the repository interface
 	params := repositories.ListParams{
 		Page:     page,
-		PageSize: perPage,
+		PageSize: pageSize,
 		Search:   search,
 		SortBy:   sortBy,
 		SortDesc: sortDesc,
@@ -332,31 +279,12 @@ func (h *UserHandler) ListUsers(c *gin.Context) {
 	// Get users using the correct UserService method signature
 	users, total, err := h.userService.ListUsers(c.Request.Context(), userCtx.TenantID, params)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, ErrorResponse{
-			Error:   "list_failed",
-			Message: "Failed to list users",
-			Details: err.Error(),
-		})
+		h.RespondInternalError(c, "Failed to list users", err.Error())
 		return
 	}
 
-	// Convert to response format
-	userResponses := make([]UserProfileResponse, len(users))
-	for i, user := range users {
-		userResponses[i] = convertToUserProfileResponse(&user)
-	}
-
-	totalPages := int((total + int64(perPage) - 1) / int64(perPage))
-
-	response := UserListResponse{
-		Users:      userResponses,
-		Total:      total,
-		Page:       page,
-		PerPage:    perPage,
-		TotalPages: totalPages,
-	}
-
-	c.JSON(http.StatusOK, response)
+	response := h.buildUserListResponse(users, total, page, pageSize)
+	h.RespondSuccess(c, response)
 }
 
 // CreateUser creates a new user (admin only)
@@ -373,22 +301,14 @@ func (h *UserHandler) ListUsers(c *gin.Context) {
 // @Failure 409 {object} ErrorResponse
 // @Router /users [post]
 func (h *UserHandler) CreateUser(c *gin.Context) {
-	userCtx := getUserContext(c)
-	if userCtx == nil {
-		c.JSON(http.StatusUnauthorized, ErrorResponse{
-			Error:   "unauthorized",
-			Message: "User context not found",
-		})
+	userCtx, ok := h.AuthenticateUser(c)
+	if !ok {
 		return
 	}
 
 	var req CreateUserRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, ErrorResponse{
-			Error:   "invalid_request",
-			Message: "Invalid request format",
-			Details: err.Error(),
-		})
+		h.RespondBadRequest(c, "Invalid request format", err.Error())
 		return
 	}
 
@@ -409,29 +329,18 @@ func (h *UserHandler) CreateUser(c *gin.Context) {
 	user, err := h.userService.CreateUser(c.Request.Context(), params)
 	if err != nil {
 		if err == services.ErrUserExists {
-			c.JSON(http.StatusConflict, ErrorResponse{
-				Error:   "user_exists",
-				Message: "User with this email already exists",
-			})
+			h.RespondConflict(c, "User with this email already exists")
 			return
 		}
 		if err == services.ErrWeakPassword {
-			c.JSON(http.StatusBadRequest, ErrorResponse{
-				Error:   "weak_password",
-				Message: "Password does not meet security requirements",
-			})
+			h.RespondBadRequest(c, "Password does not meet security requirements")
 			return
 		}
-
-		c.JSON(http.StatusInternalServerError, ErrorResponse{
-			Error:   "create_failed",
-			Message: "Failed to create user",
-			Details: err.Error(),
-		})
+		h.RespondInternalError(c, "Failed to create user", err.Error())
 		return
 	}
 
-	c.JSON(http.StatusCreated, convertToUserProfileResponse(user))
+	h.RespondCreated(c, convertToUserProfileResponse(user))
 }
 
 // UpdateUser updates an existing user (admin only)
@@ -449,23 +358,14 @@ func (h *UserHandler) CreateUser(c *gin.Context) {
 // @Failure 404 {object} ErrorResponse
 // @Router /users/{id} [put]
 func (h *UserHandler) UpdateUser(c *gin.Context) {
-	userCtx := getUserContext(c)
-	if userCtx == nil {
-		c.JSON(http.StatusUnauthorized, ErrorResponse{
-			Error:   "unauthorized",
-			Message: "User context not found",
-		})
+	userCtx, ok := h.AuthenticateUser(c)
+	if !ok {
 		return
 	}
 
 	// Parse user ID
-	userIDStr := c.Param("id")
-	userID, err := uuid.Parse(userIDStr)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, ErrorResponse{
-			Error:   "invalid_user_id",
-			Message: "Invalid user ID format",
-		})
+	userID, ok := h.ValidateUUID(c, "user ID", c.Param("id"))
+	if !ok {
 		return
 	}
 
@@ -837,6 +737,25 @@ func getUserContext(c *gin.Context) *middleware.UserContext {
 		return nil
 	}
 	return userCtx
+}
+
+// buildUserListResponse builds a paginated user list response
+func (h *UserHandler) buildUserListResponse(users []models.User, total int64, page, pageSize int) UserListResponse {
+	// Convert to response format
+	userResponses := make([]UserProfileResponse, len(users))
+	for i, user := range users {
+		userResponses[i] = convertToUserProfileResponse(&user)
+	}
+
+	totalPages := int((total + int64(pageSize) - 1) / int64(pageSize))
+
+	return UserListResponse{
+		Users:      userResponses,
+		Total:      total,
+		Page:       page,
+		PerPage:    pageSize,
+		TotalPages: totalPages,
+	}
 }
 
 // convertToUserProfileResponse converts domain model to API response

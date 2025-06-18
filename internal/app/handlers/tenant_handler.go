@@ -1,9 +1,6 @@
 package handlers
 
 import (
-	"net/http"
-	"strconv"
-
 	"github.com/archivus/archivus/internal/app/middleware"
 	"github.com/archivus/archivus/internal/domain/repositories"
 	"github.com/archivus/archivus/internal/domain/services"
@@ -14,6 +11,7 @@ import (
 
 // TenantHandler handles tenant management operations
 type TenantHandler struct {
+	*BaseHandler
 	tenantService *services.TenantService
 	userService   *services.UserService
 }
@@ -24,6 +22,7 @@ func NewTenantHandler(
 	userService *services.UserService,
 ) *TenantHandler {
 	return &TenantHandler{
+		BaseHandler:   NewBaseHandler(),
 		tenantService: tenantService,
 		userService:   userService,
 	}
@@ -127,26 +126,19 @@ type UserSummary struct {
 // @Failure 404 {object} ErrorResponse
 // @Router /tenant/settings [get]
 func (h *TenantHandler) GetSettings(c *gin.Context) {
-	userCtx := getUserContextFromGin(c)
-	if userCtx == nil {
-		c.JSON(http.StatusUnauthorized, ErrorResponse{
-			Error:   "unauthorized",
-			Message: "User context not found",
-		})
+	userCtx, ok := h.AuthenticateUser(c)
+	if !ok {
 		return
 	}
 
 	// Get tenant information
 	tenantInfo, err := h.tenantService.GetTenant(c.Request.Context(), userCtx.TenantID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, ErrorResponse{
-			Error:   "tenant_not_found",
-			Message: "Tenant not found",
-		})
+		h.RespondNotFound(c, "Tenant not found")
 		return
 	}
 
-	c.JSON(http.StatusOK, convertToTenantSettingsResponse(tenantInfo.Tenant))
+	h.RespondSuccess(c, convertToTenantSettingsResponse(tenantInfo.Tenant))
 }
 
 // UpdateSettings updates tenant settings
@@ -162,53 +154,28 @@ func (h *TenantHandler) GetSettings(c *gin.Context) {
 // @Failure 403 {object} ErrorResponse
 // @Router /tenant/settings [put]
 func (h *TenantHandler) UpdateSettings(c *gin.Context) {
-	userCtx := getUserContextFromGin(c)
-	if userCtx == nil {
-		c.JSON(http.StatusUnauthorized, ErrorResponse{
-			Error:   "unauthorized",
-			Message: "User context not found",
-		})
+	userCtx, ok := h.AuthenticateUser(c)
+	if !ok {
 		return
 	}
 
 	var req TenantSettingsRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, ErrorResponse{
-			Error:   "invalid_request",
-			Message: "Invalid request format",
-			Details: err.Error(),
-		})
+		h.RespondBadRequest(c, "Invalid request format", err.Error())
 		return
 	}
 
 	// Prepare updates map
-	updates := map[string]interface{}{
-		"name":          req.Name,
-		"business_type": req.BusinessType,
-		"industry":      req.Industry,
-		"company_size":  req.CompanySize,
-		"tax_id":        req.TaxID,
-	}
-
-	if req.Address != nil {
-		updates["address"] = req.Address
-	}
-	if req.Settings != nil {
-		updates["settings"] = req.Settings
-	}
+	updates := h.buildSettingsUpdateMap(req)
 
 	// Update tenant
-	updatedTenant, err := h.tenantService.UpdateTenant(c.Request.Context(), userCtx.TenantID, updates, userCtx.UserID)
+	tenant, err := h.tenantService.UpdateTenant(c.Request.Context(), userCtx.TenantID, updates, userCtx.UserID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, ErrorResponse{
-			Error:   "update_failed",
-			Message: "Failed to update tenant settings",
-			Details: err.Error(),
-		})
+		h.RespondInternalError(c, "Failed to update tenant settings", err.Error())
 		return
 	}
 
-	c.JSON(http.StatusOK, convertToTenantSettingsResponse(updatedTenant))
+	h.RespondSuccess(c, convertToTenantSettingsResponse(tenant))
 }
 
 // GetUsage retrieves tenant usage statistics
@@ -221,27 +188,19 @@ func (h *TenantHandler) UpdateSettings(c *gin.Context) {
 // @Failure 500 {object} ErrorResponse
 // @Router /tenant/usage [get]
 func (h *TenantHandler) GetUsage(c *gin.Context) {
-	userCtx := getUserContextFromGin(c)
-	if userCtx == nil {
-		c.JSON(http.StatusUnauthorized, ErrorResponse{
-			Error:   "unauthorized",
-			Message: "User context not found",
-		})
+	userCtx, ok := h.AuthenticateUser(c)
+	if !ok {
 		return
 	}
 
 	// Get usage statistics using the correct method
 	usage, err := h.tenantService.GetTenantUsage(c.Request.Context(), userCtx.TenantID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, ErrorResponse{
-			Error:   "usage_fetch_failed",
-			Message: "Failed to fetch usage statistics",
-			Details: err.Error(),
-		})
+		h.RespondInternalError(c, "Failed to get tenant usage", err.Error())
 		return
 	}
 
-	c.JSON(http.StatusOK, convertToTenantUsageResponse(usage))
+	h.RespondSuccess(c, convertToTenantUsageResponse(usage))
 }
 
 // GetTenantUsers lists all users in the tenant
@@ -259,81 +218,38 @@ func (h *TenantHandler) GetUsage(c *gin.Context) {
 // @Failure 403 {object} ErrorResponse
 // @Router /tenant/users [get]
 func (h *TenantHandler) GetTenantUsers(c *gin.Context) {
-	userCtx := getUserContextFromGin(c)
-	if userCtx == nil {
-		c.JSON(http.StatusUnauthorized, ErrorResponse{
-			Error:   "unauthorized",
-			Message: "User context not found",
-		})
+	userCtx, ok := h.AuthenticateUser(c)
+	if !ok {
 		return
 	}
 
-	// Parse query parameters
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	perPage, _ := strconv.Atoi(c.DefaultQuery("per_page", "20"))
-	if page < 1 {
-		page = 1
-	}
-	if perPage < 1 || perPage > 100 {
-		perPage = 20
-	}
+	page, pageSize := h.ParsePagination(c)
 
-	search := c.Query("search")
-	role := c.Query("role")
-	activeStr := c.Query("active")
+	// Get filters
+	roleFilter := c.Query("role")
+	activeFilter := c.Query("active")
 
-	// Create list parameters
+	// Get tenant users using ListUsers (existing method)
 	params := repositories.ListParams{
 		Page:     page,
-		PageSize: perPage,
-		Search:   search,
+		PageSize: pageSize,
 		SortBy:   "created_at",
 		SortDesc: true,
 	}
-
-	// Get users
-	users, _, err := h.userService.ListUsers(c.Request.Context(), userCtx.TenantID, params)
+	users, total, err := h.userService.ListUsers(c.Request.Context(), userCtx.TenantID, params)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, ErrorResponse{
-			Error:   "users_fetch_failed",
-			Message: "Failed to fetch tenant users",
-			Details: err.Error(),
-		})
+		h.RespondInternalError(c, "Failed to get tenant users", err.Error())
 		return
 	}
 
-	// Apply additional filters
-	filteredUsers := filterUsers(users, role, activeStr)
-	filteredTotal := int64(len(filteredUsers))
-
-	// Apply pagination to filtered results
-	startIdx := (page - 1) * perPage
-	endIdx := startIdx + perPage
-	if startIdx > len(filteredUsers) {
-		startIdx = len(filteredUsers)
-	}
-	if endIdx > len(filteredUsers) {
-		endIdx = len(filteredUsers)
-	}
-	paginatedUsers := filteredUsers[startIdx:endIdx]
-
-	// Convert to response format
-	userSummaries := make([]UserSummary, len(paginatedUsers))
-	for i, user := range paginatedUsers {
-		userSummaries[i] = convertToUserSummary(&user)
+	// Apply client-side filtering (will be moved to service layer)
+	if roleFilter != "" || activeFilter != "" {
+		users = filterUsers(users, roleFilter, activeFilter)
+		total = int64(len(users))
 	}
 
-	totalPages := int((filteredTotal + int64(perPage) - 1) / int64(perPage))
-
-	response := TenantUsersResponse{
-		Users:      userSummaries,
-		Total:      filteredTotal,
-		Page:       page,
-		PerPage:    perPage,
-		TotalPages: totalPages,
-	}
-
-	c.JSON(http.StatusOK, response)
+	response := h.buildTenantUsersResponse(users, total, page, pageSize)
+	h.RespondSuccess(c, response)
 }
 
 // Helper Methods
@@ -343,10 +259,7 @@ func (h *TenantHandler) requireAdminMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		userCtx := getUserContextFromGin(c)
 		if userCtx == nil || userCtx.Role != models.UserRoleAdmin {
-			c.JSON(http.StatusForbidden, ErrorResponse{
-				Error:   "admin_required",
-				Message: "Administrator privileges required",
-			})
+			h.RespondError(c, 403, "admin_required", "Administrator privileges required")
 			c.Abort()
 			return
 		}
@@ -467,5 +380,41 @@ func convertToUserSummary(user *models.User) UserSummary {
 		IsActive:    user.IsActive,
 		LastLoginAt: lastLoginAt,
 		CreatedAt:   user.CreatedAt.Format("2006-01-02T15:04:05Z"),
+	}
+}
+
+func (h *TenantHandler) buildSettingsUpdateMap(req TenantSettingsRequest) map[string]interface{} {
+	updates := map[string]interface{}{
+		"name":          req.Name,
+		"business_type": req.BusinessType,
+		"industry":      req.Industry,
+		"company_size":  req.CompanySize,
+		"tax_id":        req.TaxID,
+	}
+
+	if req.Address != nil {
+		updates["address"] = req.Address
+	}
+	if req.Settings != nil {
+		updates["settings"] = req.Settings
+	}
+
+	return updates
+}
+
+func (h *TenantHandler) buildTenantUsersResponse(users []models.User, total int64, page, pageSize int) TenantUsersResponse {
+	var userSummaries []UserSummary
+	for _, user := range users {
+		userSummaries = append(userSummaries, convertToUserSummary(&user))
+	}
+
+	totalPages := int((total + int64(pageSize) - 1) / int64(pageSize))
+
+	return TenantUsersResponse{
+		Users:      userSummaries,
+		Total:      total,
+		Page:       page,
+		PerPage:    pageSize,
+		TotalPages: totalPages,
 	}
 }

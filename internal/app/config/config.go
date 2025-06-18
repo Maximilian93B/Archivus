@@ -35,7 +35,13 @@ type DatabaseConfig struct {
 }
 
 type RedisConfig struct {
-	URL string
+	URL      string
+	Host     string
+	Port     int
+	Username string
+	Password string
+	DB       int
+	PoolSize int
 }
 
 type JWTConfig struct {
@@ -112,7 +118,13 @@ func Load() (*Config, error) {
 			TestURL: getEnv("DATABASE_URL_TEST", ""),
 		},
 		Redis: RedisConfig{
-			URL: getEnv("REDIS_URL", "redis://localhost:6379"),
+			URL:      getEnv("REDIS_URL", "redis://localhost:6379"),
+			Host:     getEnv("REDIS_HOST", "localhost"),
+			Port:     parseInt(getEnv("REDIS_PORT", "6379")),
+			Username: getEnv("REDIS_USERNAME", ""),
+			Password: getEnv("REDIS_PASSWORD", ""),
+			DB:       parseInt(getEnv("REDIS_DB", "0")),
+			PoolSize: parseInt(getEnv("REDIS_POOL_SIZE", "10")),
 		},
 		JWT: JWTConfig{
 			Secret: getEnv("JWT_SECRET", ""),

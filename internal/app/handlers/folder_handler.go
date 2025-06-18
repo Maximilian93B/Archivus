@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"strconv"
 	"strings"
 
 	"github.com/archivus/archivus/internal/domain/repositories"
@@ -16,6 +15,7 @@ import (
 
 // FolderHandler handles folder management operations
 type FolderHandler struct {
+	*BaseHandler
 	documentService *services.DocumentService
 	userService     *services.UserService
 }
@@ -26,6 +26,7 @@ func NewFolderHandler(
 	userService *services.UserService,
 ) *FolderHandler {
 	return &FolderHandler{
+		BaseHandler:     NewBaseHandler(),
 		documentService: documentService,
 		userService:     userService,
 	}
@@ -170,22 +171,14 @@ type DocumentSummary struct {
 // @Failure 409 {object} ErrorResponse
 // @Router /folders [post]
 func (h *FolderHandler) CreateFolder(c *gin.Context) {
-	userCtx := getUserContextFromGin(c)
-	if userCtx == nil {
-		c.JSON(http.StatusUnauthorized, ErrorResponse{
-			Error:   "unauthorized",
-			Message: "User context not found",
-		})
+	userCtx, ok := h.AuthenticateUser(c)
+	if !ok {
 		return
 	}
 
 	var req CreateFolderRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, ErrorResponse{
-			Error:   "invalid_request",
-			Message: "Invalid request format",
-			Details: err.Error(),
-		})
+		h.RespondBadRequest(c, "Invalid request format", err.Error())
 		return
 	}
 
@@ -239,24 +232,12 @@ func (h *FolderHandler) CreateFolder(c *gin.Context) {
 // @Failure 401 {object} ErrorResponse
 // @Router /folders [get]
 func (h *FolderHandler) ListFolders(c *gin.Context) {
-	userCtx := getUserContextFromGin(c)
-	if userCtx == nil {
-		c.JSON(http.StatusUnauthorized, ErrorResponse{
-			Error:   "unauthorized",
-			Message: "User context not found",
-		})
+	userCtx, ok := h.AuthenticateUser(c)
+	if !ok {
 		return
 	}
 
-	// Parse query parameters
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	perPage, _ := strconv.Atoi(c.DefaultQuery("per_page", "20"))
-	if page < 1 {
-		page = 1
-	}
-	if perPage < 1 || perPage > 100 {
-		perPage = 20
-	}
+	page, pageSize := h.ParsePagination(c)
 
 	includeChildren := c.Query("include_children") == "true"
 	parentIDStr := c.Query("parent_id")
@@ -288,8 +269,8 @@ func (h *FolderHandler) ListFolders(c *gin.Context) {
 
 	// Apply pagination
 	total := int64(len(folderResponses))
-	startIdx := (page - 1) * perPage
-	endIdx := startIdx + perPage
+	startIdx := (page - 1) * pageSize
+	endIdx := startIdx + pageSize
 	if startIdx > len(folderResponses) {
 		startIdx = len(folderResponses)
 	}
@@ -298,17 +279,17 @@ func (h *FolderHandler) ListFolders(c *gin.Context) {
 	}
 
 	paginatedFolders := folderResponses[startIdx:endIdx]
-	totalPages := int((total + int64(perPage) - 1) / int64(perPage))
+	totalPages := int((total + int64(pageSize) - 1) / int64(pageSize))
 
 	response := FolderListResponse{
 		Folders:    paginatedFolders,
 		Total:      total,
 		Page:       page,
-		PerPage:    perPage,
+		PerPage:    pageSize,
 		TotalPages: totalPages,
 	}
 
-	c.JSON(http.StatusOK, response)
+	h.RespondSuccess(c, response)
 }
 
 // GetFolder retrieves a specific folder with its details
@@ -324,21 +305,13 @@ func (h *FolderHandler) ListFolders(c *gin.Context) {
 // @Failure 404 {object} ErrorResponse
 // @Router /folders/{id} [get]
 func (h *FolderHandler) GetFolder(c *gin.Context) {
-	userCtx := getUserContextFromGin(c)
-	if userCtx == nil {
-		c.JSON(http.StatusUnauthorized, ErrorResponse{
-			Error:   "unauthorized",
-			Message: "User context not found",
-		})
+	userCtx, ok := h.AuthenticateUser(c)
+	if !ok {
 		return
 	}
 
-	folderID, err := uuid.Parse(c.Param("id"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, ErrorResponse{
-			Error:   "invalid_folder_id",
-			Message: "Invalid folder ID format",
-		})
+	folderID, ok := h.ValidateUUID(c, "folder ID", c.Param("id"))
+	if !ok {
 		return
 	}
 
@@ -347,10 +320,7 @@ func (h *FolderHandler) GetFolder(c *gin.Context) {
 	// Get folder
 	folder, err := h.getFolder(c.Request.Context(), folderID, userCtx.TenantID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, ErrorResponse{
-			Error:   "folder_not_found",
-			Message: "Folder not found",
-		})
+		h.RespondNotFound(c, "Folder not found")
 		return
 	}
 
@@ -362,7 +332,7 @@ func (h *FolderHandler) GetFolder(c *gin.Context) {
 		response.Children = children
 	}
 
-	c.JSON(http.StatusOK, response)
+	h.RespondSuccess(c, response)
 }
 
 // UpdateFolder updates an existing folder
@@ -379,21 +349,13 @@ func (h *FolderHandler) GetFolder(c *gin.Context) {
 // @Failure 404 {object} ErrorResponse
 // @Router /folders/{id} [put]
 func (h *FolderHandler) UpdateFolder(c *gin.Context) {
-	userCtx := getUserContextFromGin(c)
-	if userCtx == nil {
-		c.JSON(http.StatusUnauthorized, ErrorResponse{
-			Error:   "unauthorized",
-			Message: "User context not found",
-		})
+	userCtx, ok := h.AuthenticateUser(c)
+	if !ok {
 		return
 	}
 
-	folderID, err := uuid.Parse(c.Param("id"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, ErrorResponse{
-			Error:   "invalid_folder_id",
-			Message: "Invalid folder ID format",
-		})
+	folderID, ok := h.ValidateUUID(c, "folder ID", c.Param("id"))
+	if !ok {
 		return
 	}
 
@@ -448,26 +410,18 @@ func (h *FolderHandler) UpdateFolder(c *gin.Context) {
 // @Failure 409 {object} ErrorResponse
 // @Router /folders/{id} [delete]
 func (h *FolderHandler) DeleteFolder(c *gin.Context) {
-	userCtx := getUserContextFromGin(c)
-	if userCtx == nil {
-		c.JSON(http.StatusUnauthorized, ErrorResponse{
-			Error:   "unauthorized",
-			Message: "User context not found",
-		})
+	userCtx, ok := h.AuthenticateUser(c)
+	if !ok {
 		return
 	}
 
-	folderID, err := uuid.Parse(c.Param("id"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, ErrorResponse{
-			Error:   "invalid_folder_id",
-			Message: "Invalid folder ID format",
-		})
+	folderID, ok := h.ValidateUUID(c, "folder ID", c.Param("id"))
+	if !ok {
 		return
 	}
 
 	// Delete folder
-	err = h.deleteFolder(c.Request.Context(), folderID, userCtx.TenantID, userCtx.UserID)
+	err := h.deleteFolder(c.Request.Context(), folderID, userCtx.TenantID, userCtx.UserID)
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			c.JSON(http.StatusNotFound, ErrorResponse{
@@ -516,12 +470,8 @@ func (h *FolderHandler) DeleteFolder(c *gin.Context) {
 // @Failure 401 {object} ErrorResponse
 // @Router /folders/{id}/tree [get]
 func (h *FolderHandler) GetFolderTree(c *gin.Context) {
-	userCtx := getUserContextFromGin(c)
-	if userCtx == nil {
-		c.JSON(http.StatusUnauthorized, ErrorResponse{
-			Error:   "unauthorized",
-			Message: "User context not found",
-		})
+	userCtx, ok := h.AuthenticateUser(c)
+	if !ok {
 		return
 	}
 
@@ -560,21 +510,13 @@ func (h *FolderHandler) GetFolderTree(c *gin.Context) {
 // @Failure 409 {object} ErrorResponse
 // @Router /folders/{id}/move [post]
 func (h *FolderHandler) MoveFolder(c *gin.Context) {
-	userCtx := getUserContextFromGin(c)
-	if userCtx == nil {
-		c.JSON(http.StatusUnauthorized, ErrorResponse{
-			Error:   "unauthorized",
-			Message: "User context not found",
-		})
+	userCtx, ok := h.AuthenticateUser(c)
+	if !ok {
 		return
 	}
 
-	folderID, err := uuid.Parse(c.Param("id"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, ErrorResponse{
-			Error:   "invalid_folder_id",
-			Message: "Invalid folder ID format",
-		})
+	folderID, ok := h.ValidateUUID(c, "folder ID", c.Param("id"))
+	if !ok {
 		return
 	}
 
@@ -640,43 +582,25 @@ func (h *FolderHandler) MoveFolder(c *gin.Context) {
 // @Failure 404 {object} ErrorResponse
 // @Router /folders/{id}/documents [get]
 func (h *FolderHandler) GetFolderDocuments(c *gin.Context) {
-	userCtx := getUserContextFromGin(c)
-	if userCtx == nil {
-		c.JSON(http.StatusUnauthorized, ErrorResponse{
-			Error:   "unauthorized",
-			Message: "User context not found",
-		})
+	userCtx, ok := h.AuthenticateUser(c)
+	if !ok {
 		return
 	}
 
-	folderID, err := uuid.Parse(c.Param("id"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, ErrorResponse{
-			Error:   "invalid_folder_id",
-			Message: "Invalid folder ID format",
-		})
+	folderID, ok := h.ValidateUUID(c, "folder ID", c.Param("id"))
+	if !ok {
 		return
 	}
 
-	// Parse query parameters
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	perPage, _ := strconv.Atoi(c.DefaultQuery("per_page", "20"))
-	if page < 1 {
-		page = 1
-	}
-	if perPage < 1 || perPage > 100 {
-		perPage = 20
-	}
-
-	sortBy := c.DefaultQuery("sort_by", "created_at")
-	sortDesc := c.DefaultQuery("sort_desc", "true") == "true"
+	page, pageSize := h.ParsePagination(c)
+	sortBy, sortDesc := h.ParseSorting(c, "created_at")
 
 	// Get documents in folder using DocumentService
 	filters := repositories.DocumentFilters{
 		FolderID: &folderID,
 		ListParams: repositories.ListParams{
 			Page:     page,
-			PageSize: perPage,
+			PageSize: pageSize,
 			SortBy:   sortBy,
 			SortDesc: sortDesc,
 		},
@@ -684,11 +608,7 @@ func (h *FolderHandler) GetFolderDocuments(c *gin.Context) {
 
 	documents, total, err := h.documentService.ListDocuments(c.Request.Context(), userCtx.TenantID, filters)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, ErrorResponse{
-			Error:   "documents_fetch_failed",
-			Message: "Failed to fetch folder documents",
-			Details: err.Error(),
-		})
+		h.RespondInternalError(c, "Failed to fetch folder documents", err.Error())
 		return
 	}
 
@@ -698,17 +618,17 @@ func (h *FolderHandler) GetFolderDocuments(c *gin.Context) {
 		documentSummaries = append(documentSummaries, h.convertToDocumentSummary(&doc))
 	}
 
-	totalPages := int((total + int64(perPage) - 1) / int64(perPage))
+	totalPages := int((total + int64(pageSize) - 1) / int64(pageSize))
 
 	response := FolderDocumentsResponse{
 		Documents:  documentSummaries,
 		Total:      total,
 		Page:       page,
-		PerPage:    perPage,
+		PerPage:    pageSize,
 		TotalPages: totalPages,
 	}
 
-	c.JSON(http.StatusOK, response)
+	h.RespondSuccess(c, response)
 }
 
 // Helper Methods

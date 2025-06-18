@@ -1,8 +1,7 @@
 package handlers
 
 import (
-	"net/http"
-	"strconv"
+	"strings"
 
 	"github.com/archivus/archivus/internal/domain/services"
 	"github.com/archivus/archivus/internal/infrastructure/database/models"
@@ -12,6 +11,7 @@ import (
 
 // CategoryHandler handles category management operations
 type CategoryHandler struct {
+	*BaseHandler
 	documentService *services.DocumentService
 	userService     *services.UserService
 }
@@ -22,6 +22,7 @@ func NewCategoryHandler(
 	userService *services.UserService,
 ) *CategoryHandler {
 	return &CategoryHandler{
+		BaseHandler:     NewBaseHandler(),
 		documentService: documentService,
 		userService:     userService,
 	}
@@ -30,16 +31,12 @@ func NewCategoryHandler(
 // RegisterRoutes sets up the category management routes
 func (h *CategoryHandler) RegisterRoutes(router *gin.RouterGroup) {
 	categories := router.Group("/categories")
-	// Note: Auth middleware should be applied at server level
 	{
-		// CRUD operations
 		categories.POST("", h.CreateCategory)
 		categories.GET("", h.ListCategories)
 		categories.GET("/:id", h.GetCategory)
 		categories.PUT("/:id", h.UpdateCategory)
 		categories.DELETE("/:id", h.DeleteCategory)
-
-		// Special operations
 		categories.GET("/system", h.GetSystemCategories)
 	}
 }
@@ -112,26 +109,17 @@ type SystemCategoriesResponse struct {
 // @Failure 409 {object} ErrorResponse
 // @Router /categories [post]
 func (h *CategoryHandler) CreateCategory(c *gin.Context) {
-	userCtx := getUserContextFromGin(c)
-	if userCtx == nil {
-		c.JSON(http.StatusUnauthorized, ErrorResponse{
-			Error:   "unauthorized",
-			Message: "User context not found",
-		})
+	userCtx, ok := h.AuthenticateUser(c)
+	if !ok {
 		return
 	}
 
 	var req CreateCategoryRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, ErrorResponse{
-			Error:   "invalid_request",
-			Message: "Invalid request format",
-			Details: err.Error(),
-		})
+		h.RespondBadRequest(c, "Invalid request format", err.Error())
 		return
 	}
 
-	// Create category
 	category, err := h.documentService.CreateCategory(
 		c.Request.Context(),
 		userCtx.TenantID,
@@ -143,23 +131,11 @@ func (h *CategoryHandler) CreateCategory(c *gin.Context) {
 		req.SortOrder,
 	)
 	if err != nil {
-		if err.Error() == "category with name '"+req.Name+"' already exists" {
-			c.JSON(http.StatusConflict, ErrorResponse{
-				Error:   "category_exists",
-				Message: "A category with this name already exists",
-			})
-			return
-		}
-
-		c.JSON(http.StatusInternalServerError, ErrorResponse{
-			Error:   "create_failed",
-			Message: "Failed to create category",
-			Details: err.Error(),
-		})
+		h.handleCategoryError(c, err, req.Name)
 		return
 	}
 
-	c.JSON(http.StatusCreated, h.convertToCategoryResponse(category))
+	h.RespondCreated(c, h.convertToCategoryResponse(category))
 }
 
 // ListCategories lists all categories for the tenant with document counts
@@ -174,89 +150,33 @@ func (h *CategoryHandler) CreateCategory(c *gin.Context) {
 // @Failure 401 {object} ErrorResponse
 // @Router /categories [get]
 func (h *CategoryHandler) ListCategories(c *gin.Context) {
-	userCtx := getUserContextFromGin(c)
-	if userCtx == nil {
-		c.JSON(http.StatusUnauthorized, ErrorResponse{
-			Error:   "unauthorized",
-			Message: "User context not found",
-		})
+	userCtx, ok := h.AuthenticateUser(c)
+	if !ok {
 		return
 	}
 
-	// Parse query parameters
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	perPage, _ := strconv.Atoi(c.DefaultQuery("per_page", "20"))
+	page, pageSize := h.ParsePagination(c)
 	includeCounts := c.DefaultQuery("include_counts", "true") == "true"
 
-	if page < 1 {
-		page = 1
-	}
-	if perPage < 1 || perPage > 100 {
-		perPage = 20
-	}
-
-	var categoryResponses []CategoryWithCountResponse
-
 	if includeCounts {
-		// Get categories with document counts
 		categoriesWithCounts, err := h.documentService.ListCategoriesWithDocumentCount(c.Request.Context(), userCtx.TenantID)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, ErrorResponse{
-				Error:   "list_failed",
-				Message: "Failed to list categories",
-				Details: err.Error(),
-			})
+			h.RespondInternalError(c, "Failed to list categories", err.Error())
 			return
 		}
 
-		// Convert to response format
-		for _, categoryWithCount := range categoriesWithCounts {
-			categoryResponses = append(categoryResponses, h.convertToCategoryWithCountResponse(&categoryWithCount))
-		}
+		response := h.buildCategoryListResponse(categoriesWithCounts, page, pageSize)
+		h.RespondSuccess(c, response)
 	} else {
-		// Get categories without counts
 		categories, err := h.documentService.ListCategories(c.Request.Context(), userCtx.TenantID)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, ErrorResponse{
-				Error:   "list_failed",
-				Message: "Failed to list categories",
-				Details: err.Error(),
-			})
+			h.RespondInternalError(c, "Failed to list categories", err.Error())
 			return
 		}
 
-		// Convert to response format without counts
-		for _, category := range categories {
-			categoryResponses = append(categoryResponses, CategoryWithCountResponse{
-				CategoryResponse: h.convertToCategoryResponse(&category),
-				DocumentCount:    0,
-			})
-		}
+		response := h.buildSimpleCategoryListResponse(categories, page, pageSize)
+		h.RespondSuccess(c, response)
 	}
-
-	// Apply pagination
-	total := len(categoryResponses)
-	startIdx := (page - 1) * perPage
-	endIdx := startIdx + perPage
-	if startIdx > total {
-		startIdx = total
-	}
-	if endIdx > total {
-		endIdx = total
-	}
-
-	paginatedCategories := categoryResponses[startIdx:endIdx]
-	totalPages := (total + perPage - 1) / perPage
-
-	response := CategoryListResponse{
-		Categories: paginatedCategories,
-		Total:      total,
-		Page:       page,
-		PerPage:    perPage,
-		TotalPages: totalPages,
-	}
-
-	c.JSON(http.StatusOK, response)
 }
 
 // GetCategory retrieves a specific category
@@ -271,35 +191,23 @@ func (h *CategoryHandler) ListCategories(c *gin.Context) {
 // @Failure 404 {object} ErrorResponse
 // @Router /categories/{id} [get]
 func (h *CategoryHandler) GetCategory(c *gin.Context) {
-	userCtx := getUserContextFromGin(c)
-	if userCtx == nil {
-		c.JSON(http.StatusUnauthorized, ErrorResponse{
-			Error:   "unauthorized",
-			Message: "User context not found",
-		})
+	userCtx, ok := h.AuthenticateUser(c)
+	if !ok {
 		return
 	}
 
-	categoryID, err := uuid.Parse(c.Param("id"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, ErrorResponse{
-			Error:   "invalid_category_id",
-			Message: "Invalid category ID format",
-		})
+	categoryID, ok := h.ValidateUUID(c, "category ID", c.Param("id"))
+	if !ok {
 		return
 	}
 
-	// Get category
 	category, err := h.documentService.GetCategory(c.Request.Context(), categoryID, userCtx.TenantID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, ErrorResponse{
-			Error:   "category_not_found",
-			Message: "Category not found",
-		})
+		h.RespondNotFound(c, "Category not found")
 		return
 	}
 
-	c.JSON(http.StatusOK, h.convertToCategoryResponse(category))
+	h.RespondSuccess(c, h.convertToCategoryResponse(category))
 }
 
 // UpdateCategory updates an existing category
@@ -318,35 +226,129 @@ func (h *CategoryHandler) GetCategory(c *gin.Context) {
 // @Failure 409 {object} ErrorResponse
 // @Router /categories/{id} [put]
 func (h *CategoryHandler) UpdateCategory(c *gin.Context) {
-	userCtx := getUserContextFromGin(c)
-	if userCtx == nil {
-		c.JSON(http.StatusUnauthorized, ErrorResponse{
-			Error:   "unauthorized",
-			Message: "User context not found",
-		})
+	userCtx, ok := h.AuthenticateUser(c)
+	if !ok {
 		return
 	}
 
-	categoryID, err := uuid.Parse(c.Param("id"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, ErrorResponse{
-			Error:   "invalid_category_id",
-			Message: "Invalid category ID format",
-		})
+	categoryID, ok := h.ValidateUUID(c, "category ID", c.Param("id"))
+	if !ok {
 		return
 	}
 
 	var req UpdateCategoryRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, ErrorResponse{
-			Error:   "invalid_request",
-			Message: "Invalid request format",
-			Details: err.Error(),
-		})
+		h.RespondBadRequest(c, "Invalid request format", err.Error())
 		return
 	}
 
-	// Convert request to updates map
+	updates := h.buildUpdateMap(req)
+	category, err := h.documentService.UpdateCategory(c.Request.Context(), categoryID, userCtx.TenantID, updates, userCtx.UserID)
+	if err != nil {
+		h.handleCategoryUpdateError(c, err, req.Name)
+		return
+	}
+
+	h.RespondSuccess(c, h.convertToCategoryResponse(category))
+}
+
+// DeleteCategory deletes a category
+// @Summary Delete category
+// @Description Delete a category (removes it from all documents)
+// @Tags categories
+// @Param id path string true "Category ID"
+// @Success 200 {object} SuccessResponse
+// @Failure 400 {object} ErrorResponse
+// @Failure 401 {object} ErrorResponse
+// @Failure 403 {object} ErrorResponse
+// @Failure 404 {object} ErrorResponse
+// @Router /categories/{id} [delete]
+func (h *CategoryHandler) DeleteCategory(c *gin.Context) {
+	userCtx, ok := h.AuthenticateUser(c)
+	if !ok {
+		return
+	}
+
+	categoryID, ok := h.ValidateUUID(c, "category ID", c.Param("id"))
+	if !ok {
+		return
+	}
+
+	err := h.documentService.DeleteCategory(c.Request.Context(), categoryID, userCtx.TenantID, userCtx.UserID)
+	if err != nil {
+		h.handleCategoryDeleteError(c, err)
+		return
+	}
+
+	h.RespondSuccess(c, SuccessResponse{Message: "Category deleted successfully"})
+}
+
+// GetSystemCategories gets system-defined categories
+// @Summary Get system categories
+// @Description Get all system-defined categories for the tenant
+// @Tags categories
+// @Produce json
+// @Success 200 {object} SystemCategoriesResponse
+// @Failure 401 {object} ErrorResponse
+// @Router /categories/system [get]
+func (h *CategoryHandler) GetSystemCategories(c *gin.Context) {
+	userCtx, ok := h.AuthenticateUser(c)
+	if !ok {
+		return
+	}
+
+	categories, err := h.documentService.GetSystemCategories(c.Request.Context(), userCtx.TenantID)
+	if err != nil {
+		h.RespondInternalError(c, "Failed to fetch system categories", err.Error())
+		return
+	}
+
+	var responses []CategoryResponse
+	for _, category := range categories {
+		responses = append(responses, h.convertToCategoryResponse(&category))
+	}
+
+	h.RespondSuccess(c, SystemCategoriesResponse{
+		Categories: responses,
+		Count:      len(responses),
+	})
+}
+
+// Helper Methods
+
+func (h *CategoryHandler) handleCategoryError(c *gin.Context, err error, name string) {
+	if strings.Contains(err.Error(), "already exists") {
+		h.RespondConflict(c, "A category with this name already exists")
+		return
+	}
+	h.RespondInternalError(c, "Failed to create category", err.Error())
+}
+
+func (h *CategoryHandler) handleCategoryUpdateError(c *gin.Context, err error, name *string) {
+	if strings.Contains(err.Error(), "not found") {
+		h.RespondNotFound(c, "Category not found")
+		return
+	}
+	if name != nil && strings.Contains(err.Error(), "already exists") {
+		h.RespondConflict(c, "A category with this name already exists")
+		return
+	}
+	h.RespondInternalError(c, "Failed to update category", err.Error())
+}
+
+func (h *CategoryHandler) handleCategoryDeleteError(c *gin.Context, err error) {
+	if strings.Contains(err.Error(), "not found") {
+		h.RespondNotFound(c, "Category not found")
+		return
+	}
+	if strings.Contains(err.Error(), "system category") {
+		h.RespondError(c, 403, "forbidden", "Cannot delete system category")
+		return
+	}
+	h.RespondInternalError(c, "Failed to delete category", err.Error())
+}
+
+func (h *CategoryHandler) buildUpdateMap(req UpdateCategoryRequest) map[string]interface{} {
 	updates := make(map[string]interface{})
 	if req.Name != nil {
 		updates["name"] = *req.Name
@@ -363,150 +365,54 @@ func (h *CategoryHandler) UpdateCategory(c *gin.Context) {
 	if req.SortOrder != nil {
 		updates["sort_order"] = *req.SortOrder
 	}
-
-	// Update category
-	category, err := h.documentService.UpdateCategory(c.Request.Context(), categoryID, userCtx.TenantID, updates, userCtx.UserID)
-	if err != nil {
-		if err.Error() == "category not found" {
-			c.JSON(http.StatusNotFound, ErrorResponse{
-				Error:   "category_not_found",
-				Message: "Category not found",
-			})
-			return
-		}
-		if err.Error() == "cannot modify system category" {
-			c.JSON(http.StatusForbidden, ErrorResponse{
-				Error:   "system_category",
-				Message: "Cannot modify system category",
-			})
-			return
-		}
-		if req.Name != nil && err.Error() == "category with name '"+*req.Name+"' already exists" {
-			c.JSON(http.StatusConflict, ErrorResponse{
-				Error:   "category_exists",
-				Message: "A category with this name already exists",
-			})
-			return
-		}
-
-		c.JSON(http.StatusInternalServerError, ErrorResponse{
-			Error:   "update_failed",
-			Message: "Failed to update category",
-			Details: err.Error(),
-		})
-		return
-	}
-
-	c.JSON(http.StatusOK, h.convertToCategoryResponse(category))
+	return updates
 }
 
-// DeleteCategory deletes a category
-// @Summary Delete category
-// @Description Delete a category (removes it from all documents)
-// @Tags categories
-// @Param id path string true "Category ID"
-// @Success 200 {object} SuccessResponse
-// @Failure 400 {object} ErrorResponse
-// @Failure 401 {object} ErrorResponse
-// @Failure 403 {object} ErrorResponse
-// @Failure 404 {object} ErrorResponse
-// @Router /categories/{id} [delete]
-func (h *CategoryHandler) DeleteCategory(c *gin.Context) {
-	userCtx := getUserContextFromGin(c)
-	if userCtx == nil {
-		c.JSON(http.StatusUnauthorized, ErrorResponse{
-			Error:   "unauthorized",
-			Message: "User context not found",
-		})
-		return
+func (h *CategoryHandler) buildCategoryListResponse(categoriesWithCounts []services.CategoryWithCount, page, pageSize int) CategoryListResponse {
+	var responses []CategoryWithCountResponse
+	for _, categoryWithCount := range categoriesWithCounts {
+		responses = append(responses, h.convertToCategoryWithCountResponse(&categoryWithCount))
 	}
 
-	categoryID, err := uuid.Parse(c.Param("id"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, ErrorResponse{
-			Error:   "invalid_category_id",
-			Message: "Invalid category ID format",
-		})
-		return
-	}
-
-	// Delete category
-	err = h.documentService.DeleteCategory(c.Request.Context(), categoryID, userCtx.TenantID, userCtx.UserID)
-	if err != nil {
-		if err.Error() == "category not found" {
-			c.JSON(http.StatusNotFound, ErrorResponse{
-				Error:   "category_not_found",
-				Message: "Category not found",
-			})
-			return
-		}
-		if err.Error() == "cannot delete system category" {
-			c.JSON(http.StatusForbidden, ErrorResponse{
-				Error:   "system_category",
-				Message: "Cannot delete system category",
-			})
-			return
-		}
-
-		c.JSON(http.StatusInternalServerError, ErrorResponse{
-			Error:   "delete_failed",
-			Message: "Failed to delete category",
-			Details: err.Error(),
-		})
-		return
-	}
-
-	c.JSON(http.StatusOK, SuccessResponse{
-		Message: "Category deleted successfully",
-	})
+	return h.paginateCategoryResponses(responses, page, pageSize)
 }
 
-// GetSystemCategories gets system-defined categories
-// @Summary Get system categories
-// @Description Get all system-defined categories for the tenant
-// @Tags categories
-// @Produce json
-// @Success 200 {object} SystemCategoriesResponse
-// @Failure 401 {object} ErrorResponse
-// @Router /categories/system [get]
-func (h *CategoryHandler) GetSystemCategories(c *gin.Context) {
-	userCtx := getUserContextFromGin(c)
-	if userCtx == nil {
-		c.JSON(http.StatusUnauthorized, ErrorResponse{
-			Error:   "unauthorized",
-			Message: "User context not found",
-		})
-		return
-	}
-
-	// Get system categories
-	categories, err := h.documentService.GetSystemCategories(c.Request.Context(), userCtx.TenantID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, ErrorResponse{
-			Error:   "fetch_failed",
-			Message: "Failed to fetch system categories",
-			Details: err.Error(),
-		})
-		return
-	}
-
-	// Convert to response format
-	var categoryResponses []CategoryResponse
+func (h *CategoryHandler) buildSimpleCategoryListResponse(categories []models.Category, page, pageSize int) CategoryListResponse {
+	var responses []CategoryWithCountResponse
 	for _, category := range categories {
-		categoryResponses = append(categoryResponses, h.convertToCategoryResponse(&category))
+		response := CategoryWithCountResponse{
+			CategoryResponse: h.convertToCategoryResponse(&category),
+			DocumentCount:    0, // No count requested
+		}
+		responses = append(responses, response)
 	}
 
-	response := SystemCategoriesResponse{
-		Categories: categoryResponses,
-		Count:      len(categoryResponses),
-	}
-
-	c.JSON(http.StatusOK, response)
+	return h.paginateCategoryResponses(responses, page, pageSize)
 }
 
-// Helper Methods
+func (h *CategoryHandler) paginateCategoryResponses(responses []CategoryWithCountResponse, page, pageSize int) CategoryListResponse {
+	total := len(responses)
+	startIdx := (page - 1) * pageSize
+	endIdx := startIdx + pageSize
+	if startIdx > total {
+		startIdx = total
+	}
+	if endIdx > total {
+		endIdx = total
+	}
 
-// convertToCategoryResponse converts domain model to API response
+	paginatedCategories := responses[startIdx:endIdx]
+	totalPages := (total + pageSize - 1) / pageSize
+
+	return CategoryListResponse{
+		Categories: paginatedCategories,
+		Total:      total,
+		Page:       page,
+		PerPage:    pageSize,
+		TotalPages: totalPages,
+	}
+}
+
 func (h *CategoryHandler) convertToCategoryResponse(category *models.Category) CategoryResponse {
 	return CategoryResponse{
 		ID:          category.ID,
@@ -520,7 +426,6 @@ func (h *CategoryHandler) convertToCategoryResponse(category *models.Category) C
 	}
 }
 
-// convertToCategoryWithCountResponse converts category with count to API response
 func (h *CategoryHandler) convertToCategoryWithCountResponse(categoryWithCount *services.CategoryWithCount) CategoryWithCountResponse {
 	return CategoryWithCountResponse{
 		CategoryResponse: h.convertToCategoryResponse(&categoryWithCount.Category),

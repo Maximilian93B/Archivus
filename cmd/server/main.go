@@ -7,6 +7,7 @@ import (
 
 	"github.com/archivus/archivus/internal/app/config"
 	"github.com/archivus/archivus/internal/app/server"
+	appservices "github.com/archivus/archivus/internal/app/services"
 	"github.com/archivus/archivus/internal/domain/services"
 	"github.com/archivus/archivus/internal/infrastructure/auth/supabase"
 	"github.com/archivus/archivus/internal/infrastructure/database"
@@ -37,21 +38,34 @@ func main() {
 	}
 	defer db.Close()
 
-	repos := initializeRepositories(db, log)
-	log.Info("Database and repositories initialized successfully", "repository_count", 13)
-
-	// Verify repositories are properly initialized
-	if repos == nil {
-		log.Error("Failed to initialize repositories")
+	// Initialize service manager with Redis
+	serviceManager, err := appservices.NewServiceManager(cfg, db)
+	if err != nil {
+		log.Error("Failed to initialize service manager", "error", err)
 		os.Exit(1)
 	}
+	defer serviceManager.Close()
+
+	log.Info("Service manager initialized successfully with Redis",
+		"redis_url", cfg.Redis.URL,
+		"database_initialized", true)
+
+	// Health check to verify all services are working
+	if err := serviceManager.HealthCheck(); err != nil {
+		log.Error("Service health check failed", "error", err)
+		os.Exit(1)
+	}
+	log.Info("All services healthy - Database and Redis connected")
+
+	repos := serviceManager.Repositories
+	log.Info("Database and repositories initialized successfully", "repository_count", 13)
 
 	// Initialize external services
 	storageService := initializeStorageService(cfg, log)
 	authService := initializeAuthService(cfg, log)
 
-	// Initialize business services with complete wiring
-	businessServices := initializeBusinessServices(repos, storageService, authService, cfg, log)
+	// Initialize business services with Redis cache
+	businessServices := initializeBusinessServices(repos, storageService, authService, cfg, serviceManager.CacheService, log)
 
 	// Create HTTP server
 	srv := server.NewServer(cfg, businessServices, log)
@@ -172,6 +186,7 @@ func initializeBusinessServices(
 	storageService *local.StorageService,
 	authService *supabase.AuthService,
 	cfg *config.Config,
+	cacheService services.CacheService,
 	log *logger.Logger,
 ) *server.Services {
 	log.Info("Initializing business services with complete repository wiring...")
@@ -224,6 +239,7 @@ func initializeBusinessServices(
 		authService,
 		nil, // emailService - will be implemented in Phase 3
 		userServiceConfig,
+		cacheService,
 	)
 
 	// Initialize TenantService with full dependencies

@@ -22,6 +22,19 @@ func NewDocumentRepository(db *database.DB) repositories.DocumentRepository {
 }
 
 func (r *DocumentRepository) Create(ctx context.Context, document *models.Document) error {
+	// Check for duplicate content hash within tenant
+	var existingDoc models.Document
+	err := r.db.WithContext(ctx).
+		Select("id").
+		Where("tenant_id = ? AND content_hash = ?", document.TenantID, document.ContentHash).
+		First(&existingDoc).Error
+
+	if err == nil {
+		return fmt.Errorf("document with content hash '%s' already exists", document.ContentHash)
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return fmt.Errorf("failed to check for duplicate content: %w", err)
+	}
+
 	if err := r.db.WithContext(ctx).Create(document).Error; err != nil {
 		return fmt.Errorf("failed to create document: %w", err)
 	}

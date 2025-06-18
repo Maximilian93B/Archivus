@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base32"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -36,6 +37,7 @@ type UserService struct {
 	supabaseAuth SupabaseAuthService
 	emailService EmailService
 	config       UserServiceConfig
+	cacheService CacheService
 }
 
 // UserServiceConfig holds configuration for user management
@@ -60,6 +62,7 @@ func NewUserService(
 	supabaseAuth SupabaseAuthService,
 	emailService EmailService,
 	config UserServiceConfig,
+	cacheService CacheService,
 ) *UserService {
 	return &UserService{
 		userRepo:     userRepo,
@@ -68,6 +71,7 @@ func NewUserService(
 		supabaseAuth: supabaseAuth,
 		emailService: emailService,
 		config:       config,
+		cacheService: cacheService,
 	}
 }
 
@@ -106,10 +110,11 @@ type LoginResult struct {
 // UserProfile contains user profile information
 type UserProfile struct {
 	*models.User
-	Permissions    []string   `json:"permissions"`
-	LastLogin      *time.Time `json:"last_login"`
-	PasswordExpiry *time.Time `json:"password_expiry,omitempty"`
-	MFAEnabled     bool       `json:"mfa_enabled"`
+	Permissions    []string       `json:"permissions"`
+	LastLogin      *time.Time     `json:"last_login"`
+	PasswordExpiry *time.Time     `json:"password_expiry,omitempty"`
+	MFAEnabled     bool           `json:"mfa_enabled"`
+	Tenant         *models.Tenant `json:"tenant"`
 }
 
 // CreateUser creates a new user account with Supabase Auth
@@ -272,11 +277,28 @@ func (s *UserService) ValidateToken(ctx context.Context, token string) (*models.
 	return user, nil
 }
 
-// GetUserProfile gets detailed user profile information
+// GetUserProfile retrieves a user profile with caching
 func (s *UserService) GetUserProfile(ctx context.Context, userID uuid.UUID) (*UserProfile, error) {
+	// Try to get from cache first
+	cacheKey := fmt.Sprintf(UserCacheKeyPattern, userID.String())
+
+	if cached, err := s.cacheService.Get(ctx, cacheKey); err == nil {
+		var profile UserProfile
+		if json.Unmarshal([]byte(cached), &profile) == nil {
+			return &profile, nil
+		}
+	}
+
+	// If not in cache, get from database
 	user, err := s.userRepo.GetByID(ctx, userID)
 	if err != nil {
-		return nil, ErrUserNotFound
+		return nil, fmt.Errorf("failed to get user: %w", err)
+	}
+
+	// Get tenant information
+	tenant, err := s.tenantRepo.GetByID(ctx, user.TenantID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get tenant: %w", err)
 	}
 
 	// Get user permissions based on role
@@ -289,77 +311,62 @@ func (s *UserService) GetUserProfile(ctx context.Context, userID uuid.UUID) (*Us
 		passwordExpiry = &expiry
 	}
 
-	return &UserProfile{
+	profile := &UserProfile{
 		User:           user,
 		Permissions:    permissions,
 		LastLogin:      user.LastLoginAt,
 		PasswordExpiry: passwordExpiry,
 		MFAEnabled:     user.MFAEnabled,
-	}, nil
-}
-
-// UpdateUser updates user information
-func (s *UserService) UpdateUser(ctx context.Context, userID uuid.UUID, updates map[string]interface{}, updatedBy uuid.UUID) (*models.User, error) {
-	user, err := s.userRepo.GetByID(ctx, userID)
-	if err != nil {
-		return nil, ErrUserNotFound
+		Tenant:         tenant,
 	}
 
-	// Apply updates
+	// Cache the profile for future requests
+	if profileJSON, err := json.Marshal(profile); err == nil {
+		s.cacheService.Set(ctx, cacheKey, string(profileJSON), CacheMediumTerm)
+	}
+
+	return profile, nil
+}
+
+// UpdateUser updates user information and invalidates cache
+func (s *UserService) UpdateUser(ctx context.Context, userID uuid.UUID, updates map[string]interface{}, updatedByID uuid.UUID) (*models.User, error) {
+	// First get the user
+	user, err := s.userRepo.GetByID(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get user: %w", err)
+	}
+
+	// Apply updates to the user model
 	if firstName, ok := updates["first_name"].(string); ok {
 		user.FirstName = firstName
 	}
-
 	if lastName, ok := updates["last_name"].(string); ok {
 		user.LastName = lastName
 	}
-
 	if department, ok := updates["department"].(string); ok {
 		user.Department = department
 	}
-
 	if jobTitle, ok := updates["job_title"].(string); ok {
 		user.JobTitle = jobTitle
 	}
 
-	if role, ok := updates["role"].(models.UserRole); ok {
-		if !s.isValidRole(role) {
-			return nil, ErrInvalidRole
-		}
-		user.Role = role
-	}
-
-	if preferences, ok := updates["preferences"].(map[string]interface{}); ok {
-		user.Preferences = models.JSONB(preferences)
-	}
-
-	if notifications, ok := updates["notification_settings"].(map[string]interface{}); ok {
-		user.NotificationSettings = models.JSONB(notifications)
-	}
-
-	user.UpdatedAt = time.Now()
-
+	// Update in database
 	if err := s.userRepo.Update(ctx, user); err != nil {
 		return nil, fmt.Errorf("failed to update user: %w", err)
 	}
 
-	// Update user in Supabase as well
-	supabaseUpdates := map[string]interface{}{
-		"user_metadata": map[string]interface{}{
-			"first_name": user.FirstName,
-			"last_name":  user.LastName,
-			"role":       string(user.Role),
-			"department": user.Department,
-			"job_title":  user.JobTitle,
-		},
+	// Invalidate user cache
+	cacheKey := fmt.Sprintf(UserCacheKeyPattern, userID.String())
+	s.cacheService.Delete(ctx, cacheKey)
+
+	// Update session cache if needed
+	sessionKey := fmt.Sprintf(SessionKeyPattern, userID.String())
+	if exists, _ := s.cacheService.Exists(ctx, sessionKey); exists {
+		// Update session with new user info
+		if userJSON, err := json.Marshal(user); err == nil {
+			s.cacheService.HSet(ctx, sessionKey, "user", string(userJSON))
+		}
 	}
-
-	// Get user's current token (this would need to be passed or retrieved)
-	// For now, use admin update
-	s.supabaseAuth.AdminUpdateUser(userID.String(), supabaseUpdates)
-
-	// Create audit log
-	s.createAuditLog(ctx, user.TenantID, updatedBy, user.ID, models.AuditUpdate, "User updated")
 
 	return user, nil
 }
@@ -733,3 +740,122 @@ func (s *UserService) createAuditLog(ctx context.Context, tenantID, userID, reso
 
 // External service interfaces are now defined in external_interfaces.go
 // This avoids duplication and centralizes interface definitions
+
+// CacheUserSession stores user session data in Redis
+func (s *UserService) CacheUserSession(ctx context.Context, userID uuid.UUID, sessionToken string, user *models.User) error {
+	sessionKey := fmt.Sprintf(SessionKeyPattern, sessionToken)
+
+	// Store session as a hash for easy field updates
+	sessionData := map[string]interface{}{
+		"user_id":    userID.String(),
+		"created_at": time.Now().Unix(),
+		"last_seen":  time.Now().Unix(),
+	}
+
+	if user != nil {
+		if userJSON, err := json.Marshal(user); err == nil {
+			sessionData["user"] = string(userJSON)
+		}
+	}
+
+	// Set each field
+	for field, value := range sessionData {
+		if err := s.cacheService.HSet(ctx, sessionKey, field, value); err != nil {
+			return fmt.Errorf("failed to set session field %s: %w", field, err)
+		}
+	}
+
+	// Set session expiration
+	s.cacheService.Set(ctx, sessionKey+"_ttl", "1", SessionDuration)
+
+	return nil
+}
+
+// GetUserSession retrieves user session from Redis
+func (s *UserService) GetUserSession(ctx context.Context, sessionToken string) (*models.User, error) {
+	sessionKey := fmt.Sprintf(SessionKeyPattern, sessionToken)
+
+	// Check if session exists
+	exists, err := s.cacheService.Exists(ctx, sessionKey)
+	if err != nil || !exists {
+		return nil, fmt.Errorf("session not found")
+	}
+
+	// Get user data from session
+	userJSON, err := s.cacheService.HGet(ctx, sessionKey, "user")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get user from session: %w", err)
+	}
+
+	var user models.User
+	if err := json.Unmarshal([]byte(userJSON), &user); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal user data: %w", err)
+	}
+
+	// Update last seen
+	s.cacheService.HSet(ctx, sessionKey, "last_seen", time.Now().Unix())
+
+	return &user, nil
+}
+
+// InvalidateUserSession removes user session from Redis
+func (s *UserService) InvalidateUserSession(ctx context.Context, sessionToken string) error {
+	sessionKey := fmt.Sprintf(SessionKeyPattern, sessionToken)
+	return s.cacheService.Delete(ctx, sessionKey)
+}
+
+// IncrementUserLoginCount increments user login counter
+func (s *UserService) IncrementUserLoginCount(ctx context.Context, userID uuid.UUID) (int64, error) {
+	counterKey := fmt.Sprintf("user_login_count:%s", userID.String())
+	return s.cacheService.Increment(ctx, counterKey)
+}
+
+// GetActiveUserSessions gets list of active sessions for a user (for security/admin purposes)
+func (s *UserService) GetActiveUserSessions(ctx context.Context, userID uuid.UUID) ([]string, error) {
+	sessionsKey := fmt.Sprintf("user_sessions:%s", userID.String())
+	return s.cacheService.SMembers(ctx, sessionsKey)
+}
+
+// AddUserToActiveList adds user to active users set
+func (s *UserService) AddUserToActiveList(ctx context.Context, userID uuid.UUID) error {
+	activeUsersKey := "active_users"
+	return s.cacheService.SAdd(ctx, activeUsersKey, userID.String())
+}
+
+// CacheUserPermissions caches user permissions for quick access
+func (s *UserService) CacheUserPermissions(ctx context.Context, userID uuid.UUID, permissions []string) error {
+	permissionsKey := fmt.Sprintf("user_permissions:%s", userID.String())
+
+	// Store as a set for efficient membership testing
+	permissionInterfaces := make([]interface{}, len(permissions))
+	for i, perm := range permissions {
+		permissionInterfaces[i] = perm
+	}
+
+	if err := s.cacheService.SAdd(ctx, permissionsKey, permissionInterfaces...); err != nil {
+		return fmt.Errorf("failed to cache permissions: %w", err)
+	}
+
+	// Set expiration
+	s.cacheService.Set(ctx, permissionsKey+"_ttl", "1", CacheLongTerm)
+
+	return nil
+}
+
+// Example: Rate limiting per user
+func (s *UserService) CheckUserRateLimit(ctx context.Context, userID uuid.UUID, action string, limit int64) (bool, error) {
+	rateLimitKey := fmt.Sprintf("rate_limit:%s:%s", userID.String(), action)
+
+	// Increment counter
+	count, err := s.cacheService.Increment(ctx, rateLimitKey)
+	if err != nil {
+		return false, fmt.Errorf("failed to increment rate limit: %w", err)
+	}
+
+	// Set expiration on first increment
+	if count == 1 {
+		s.cacheService.Set(ctx, rateLimitKey+"_ttl", "1", RateLimitWindow)
+	}
+
+	return count <= limit, nil
+}
