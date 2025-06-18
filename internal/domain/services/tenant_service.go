@@ -31,6 +31,7 @@ type TenantService struct {
 	documentRepo repositories.DocumentRepository
 	auditRepo    repositories.AuditLogRepository
 
+	userService         UserServiceInterface
 	subscriptionService SubscriptionService
 	config              TenantServiceConfig
 }
@@ -55,6 +56,7 @@ func NewTenantService(
 	userRepo repositories.UserRepository,
 	documentRepo repositories.DocumentRepository,
 	auditRepo repositories.AuditLogRepository,
+	userService UserServiceInterface,
 	subscriptionService SubscriptionService,
 	config TenantServiceConfig,
 ) *TenantService {
@@ -63,6 +65,7 @@ func NewTenantService(
 		userRepo:            userRepo,
 		documentRepo:        documentRepo,
 		auditRepo:           auditRepo,
+		userService:         userService,
 		subscriptionService: subscriptionService,
 		config:              config,
 	}
@@ -97,8 +100,14 @@ type TenantInfo struct {
 	DaysUntilExpiry    *int                      `json:"days_until_expiry,omitempty"`
 }
 
+// CreateTenantResult contains the result of tenant creation
+type CreateTenantResult struct {
+	Tenant    *models.Tenant `json:"tenant"`
+	AdminUser *models.User   `json:"admin_user"`
+}
+
 // CreateTenant creates a new tenant with initial setup
-func (s *TenantService) CreateTenant(ctx context.Context, params CreateTenantParams) (*models.Tenant, error) {
+func (s *TenantService) CreateTenant(ctx context.Context, params CreateTenantParams) (*CreateTenantResult, error) {
 	// Validate subdomain
 	if err := s.validateSubdomain(params.Subdomain); err != nil {
 		return nil, err
@@ -149,8 +158,9 @@ func (s *TenantService) CreateTenant(ctx context.Context, params CreateTenantPar
 		return nil, fmt.Errorf("failed to create tenant: %w", err)
 	}
 
-	// Create admin user
-	if err := s.createAdminUser(ctx, tenant.ID, params); err != nil {
+	// Create admin user and capture the result
+	adminUser, err := s.createAdminUser(ctx, tenant.ID, params)
+	if err != nil {
 		// Rollback tenant creation
 		s.tenantRepo.Delete(ctx, tenant.ID)
 		return nil, fmt.Errorf("failed to create admin user: %w", err)
@@ -171,7 +181,10 @@ func (s *TenantService) CreateTenant(ctx context.Context, params CreateTenantPar
 		s.subscriptionService.InitializeSubscription(ctx, tenant.ID, params.SubscriptionTier)
 	}
 
-	return tenant, nil
+	return &CreateTenantResult{
+		Tenant:    tenant,
+		AdminUser: adminUser,
+	}, nil
 }
 
 // GetTenant retrieves tenant information
@@ -602,10 +615,27 @@ func (s *TenantService) isValidUpgrade(current, new models.SubscriptionTier) boo
 	return tiers[new] > tiers[current]
 }
 
-func (s *TenantService) createAdminUser(ctx context.Context, tenantID uuid.UUID, params CreateTenantParams) error {
-	// This would hash the password and create the admin user
-	// Implementation depends on your user service
-	return nil
+func (s *TenantService) createAdminUser(ctx context.Context, tenantID uuid.UUID, params CreateTenantParams) (*models.User, error) {
+	// Create admin user using UserService (properly integrates with Supabase Auth)
+	userParams := CreateUserParams{
+		TenantID:   tenantID,
+		Email:      params.AdminEmail,
+		Password:   params.AdminPassword,
+		FirstName:  params.AdminFirstName,
+		LastName:   params.AdminLastName,
+		Role:       models.UserRoleAdmin,
+		Department: "",
+		JobTitle:   "Administrator",
+		CreatedBy:  uuid.Nil, // Self-created during tenant setup
+	}
+
+	// Create user with proper Supabase Auth integration
+	adminUser, err := s.userService.CreateUser(ctx, userParams)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create admin user: %w", err)
+	}
+
+	return adminUser, nil
 }
 
 func (s *TenantService) setupDefaultFolders(ctx context.Context, tenantID uuid.UUID) error {
@@ -661,10 +691,14 @@ type TenantHealth struct {
 	Warnings  []string  `json:"warnings"`
 }
 
-// External service interface
+// External service interfaces
 type SubscriptionService interface {
 	InitializeSubscription(ctx context.Context, tenantID uuid.UUID, tier models.SubscriptionTier) error
 	UpgradeSubscription(ctx context.Context, tenantID uuid.UUID, newTier models.SubscriptionTier) error
 	CancelSubscription(ctx context.Context, tenantID uuid.UUID) error
 	GetSubscriptionStatus(ctx context.Context, tenantID uuid.UUID) (string, error)
+}
+
+type UserServiceInterface interface {
+	CreateUser(ctx context.Context, params CreateUserParams) (*models.User, error)
 }

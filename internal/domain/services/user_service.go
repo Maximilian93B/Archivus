@@ -150,9 +150,22 @@ func (s *UserService) CreateUser(ctx context.Context, params CreateUserParams) (
 		"job_title":  params.JobTitle,
 	}
 
-	supabaseUser, err := s.supabaseAuth.SignUpWithEmail(params.Email, params.Password, metadata)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create user in Supabase: %w", err)
+	var supabaseUser *SupabaseUser
+
+	// Use AdminCreateUser for admin users to bypass RLS policies
+	if params.Role == models.UserRoleAdmin {
+		var err error
+		supabaseUser, err = s.supabaseAuth.AdminCreateUser(params.Email, params.Password, metadata, true)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create admin user in Supabase: %w", err)
+		}
+	} else {
+		// Use regular signup for non-admin users
+		var err error
+		supabaseUser, err = s.supabaseAuth.SignUpWithEmail(params.Email, params.Password, metadata)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create user in Supabase: %w", err)
+		}
 	}
 
 	// Create user in local database

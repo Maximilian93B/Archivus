@@ -69,6 +69,7 @@ type SupabaseAuthService interface {
 	UpdateUser(accessToken string, updates map[string]interface{}) (*SupabaseUser, error)
 
 	// Admin operations (using service key)
+	AdminCreateUser(email, password string, metadata map[string]interface{}, emailConfirmed bool) (*SupabaseUser, error)
 	AdminGetUser(userID string) (*SupabaseUser, error)
 	AdminUpdateUser(userID string, updates map[string]interface{}) (*SupabaseUser, error)
 	AdminDeleteUser(userID string) error

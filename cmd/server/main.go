@@ -168,8 +168,9 @@ func initializeAuthService(cfg *config.Config, log *logger.Logger) *supabase.Aut
 	}
 
 	authService, err := supabase.NewAuthService(supabase.Config{
-		URL:    cfg.Supabase.URL,
-		APIKey: cfg.Supabase.APIKey,
+		URL:        cfg.Supabase.URL,
+		APIKey:     cfg.Supabase.APIKey,
+		ServiceKey: cfg.Supabase.ServiceKey,
 	})
 	if err != nil {
 		log.Error("Failed to initialize auth service", "error", err)
@@ -242,13 +243,14 @@ func initializeBusinessServices(
 		cacheService,
 	)
 
-	// Initialize TenantService with full dependencies
+	// Initialize TenantService with full dependencies (including UserService)
 	tenantService := services.NewTenantService(
 		repos.TenantRepo,
 		repos.UserRepo,
 		repos.DocumentRepo,
 		repos.AuditRepo,
-		nil, // subscriptionService - will be implemented in Phase 4
+		userService, // UserService for proper admin user creation
+		nil,         // subscriptionService - will be implemented in Phase 4
 		tenantServiceConfig,
 	)
 

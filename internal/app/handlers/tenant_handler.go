@@ -49,7 +49,40 @@ func (h *TenantHandler) RegisterRoutes(router *gin.RouterGroup) {
 	}
 }
 
+// RegisterPublicRoutes sets up public tenant routes (no auth required)
+func (h *TenantHandler) RegisterPublicRoutes(router *gin.RouterGroup) {
+	tenant := router.Group("/tenant")
+	{
+		// Public tenant creation (sign-up)
+		tenant.POST("", h.CreateTenant)
+	}
+}
+
 // Request/Response DTOs
+
+// CreateTenantRequest contains tenant creation data
+type CreateTenantRequest struct {
+	Name             string                 `json:"name" binding:"required,min=2,max=100"`
+	Subdomain        string                 `json:"subdomain" binding:"required,min=2,max=50,alphanum"`
+	SubscriptionTier string                 `json:"subscription_tier,omitempty"`
+	BusinessType     string                 `json:"business_type,omitempty" binding:"max=50"`
+	Industry         string                 `json:"industry,omitempty" binding:"max=50"`
+	CompanySize      string                 `json:"company_size,omitempty" binding:"max=20"`
+	TaxID            string                 `json:"tax_id,omitempty" binding:"max=50"`
+	Address          map[string]interface{} `json:"address,omitempty"`
+
+	// Admin user details
+	AdminEmail     string `json:"admin_email" binding:"required,email"`
+	AdminFirstName string `json:"admin_first_name" binding:"required,min=1,max=50"`
+	AdminLastName  string `json:"admin_last_name" binding:"required,min=1,max=50"`
+	AdminPassword  string `json:"admin_password" binding:"required,min=8"`
+}
+
+// CreateTenantResponse represents the response after tenant creation
+type CreateTenantResponse struct {
+	Tenant *TenantSettingsResponse `json:"tenant"`
+	Admin  *UserSummary            `json:"admin"`
+}
 
 // TenantSettingsRequest contains tenant settings update data
 type TenantSettingsRequest struct {
@@ -115,6 +148,80 @@ type UserSummary struct {
 }
 
 // Handler Methods
+
+// CreateTenant creates a new tenant with admin user
+// @Summary Create tenant
+// @Description Create a new tenant with admin user (public endpoint)
+// @Tags tenant
+// @Accept json
+// @Produce json
+// @Param request body CreateTenantRequest true "Tenant creation request"
+// @Success 201 {object} CreateTenantResponse
+// @Failure 400 {object} ErrorResponse
+// @Failure 409 {object} ErrorResponse
+// @Router /tenant [post]
+func (h *TenantHandler) CreateTenant(c *gin.Context) {
+	var req CreateTenantRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		h.RespondBadRequest(c, "Invalid request format", err.Error())
+		return
+	}
+
+	// Set default subscription tier if not provided
+	subscriptionTier := models.SubscriptionStarter
+	if req.SubscriptionTier != "" {
+		switch req.SubscriptionTier {
+		case "starter":
+			subscriptionTier = models.SubscriptionStarter
+		case "professional":
+			subscriptionTier = models.SubscriptionProfessional
+		case "enterprise":
+			subscriptionTier = models.SubscriptionEnterprise
+		default:
+			h.RespondBadRequest(c, "Invalid subscription tier")
+			return
+		}
+	}
+
+	// Create tenant parameters
+	params := services.CreateTenantParams{
+		Name:             req.Name,
+		Subdomain:        req.Subdomain,
+		SubscriptionTier: subscriptionTier,
+		BusinessType:     req.BusinessType,
+		Industry:         req.Industry,
+		CompanySize:      req.CompanySize,
+		TaxID:            req.TaxID,
+		Address:          req.Address,
+		AdminEmail:       req.AdminEmail,
+		AdminFirstName:   req.AdminFirstName,
+		AdminLastName:    req.AdminLastName,
+		AdminPassword:    req.AdminPassword,
+	}
+
+	// Create tenant with admin user
+	result, err := h.tenantService.CreateTenant(c.Request.Context(), params)
+	if err != nil {
+		if err == services.ErrSubdomainTaken {
+			h.RespondConflict(c, "Subdomain is already taken")
+		} else if err == services.ErrInvalidSubdomain {
+			h.RespondBadRequest(c, "Invalid subdomain format")
+		} else {
+			h.RespondBadRequest(c, "Failed to create tenant", err.Error())
+		}
+		return
+	}
+
+	// Convert the actual created admin user to response format
+	adminSummary := convertToUserSummary(result.AdminUser)
+
+	response := CreateTenantResponse{
+		Tenant: convertToTenantSettingsResponsePtr(result.Tenant),
+		Admin:  &adminSummary,
+	}
+
+	h.RespondCreated(c, response)
+}
 
 // GetSettings retrieves tenant settings
 // @Summary Get tenant settings
@@ -322,6 +429,12 @@ func convertToTenantSettingsResponse(tenant *models.Tenant) TenantSettingsRespon
 		CreatedAt:    tenant.CreatedAt.Format("2006-01-02T15:04:05Z"),
 		UpdatedAt:    tenant.UpdatedAt.Format("2006-01-02T15:04:05Z"),
 	}
+}
+
+// convertToTenantSettingsResponsePtr converts domain model to API response pointer
+func convertToTenantSettingsResponsePtr(tenant *models.Tenant) *TenantSettingsResponse {
+	response := convertToTenantSettingsResponse(tenant)
+	return &response
 }
 
 // convertToTenantUsageResponse converts usage stats to API response
