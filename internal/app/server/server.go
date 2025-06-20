@@ -11,6 +11,7 @@ import (
 
 	"github.com/archivus/archivus/internal/app/config"
 	"github.com/archivus/archivus/internal/app/handlers"
+	"github.com/archivus/archivus/internal/app/middleware"
 	"github.com/archivus/archivus/internal/domain/services"
 	"github.com/archivus/archivus/pkg/logger"
 	"github.com/gin-contrib/cors"
@@ -24,6 +25,7 @@ type Server struct {
 	router   *gin.Engine
 	server   *http.Server
 	handlers *Handlers
+	services *Services
 	logger   *logger.Logger
 }
 
@@ -68,6 +70,7 @@ func NewServer(
 		config:   cfg,
 		router:   router,
 		handlers: handlers,
+		services: services,
 		logger:   logger,
 	}
 
@@ -125,18 +128,31 @@ func (s *Server) setupRoutes() {
 	// API version 1
 	v1 := s.router.Group("/api/v1")
 	{
-		// Register handler routes
+		// Register public routes first (no auth required)
+		s.handlers.TenantHandler.RegisterPublicRoutes(v1)
+
+		// Register auth routes (these handle their own authentication)
 		s.handlers.AuthHandler.SetupRoutes(v1)
-		s.handlers.DocumentHandler.RegisterRoutes(v1)
-		s.handlers.UserHandler.RegisterRoutes(v1)
-		s.handlers.TenantHandler.RegisterRoutes(v1)
-		s.handlers.FolderHandler.RegisterRoutes(v1)
-		s.handlers.TagHandler.RegisterRoutes(v1)
-		s.handlers.CategoryHandler.RegisterRoutes(v1)
+
+		// Create auth middleware
+		authMiddleware := middleware.AuthMiddleware(s.services.AuthService, s.services.UserService)
+
+		// Protected routes that require authentication
+		protected := v1.Group("")
+		protected.Use(authMiddleware)
+		{
+			// Register authenticated handler routes
+			s.handlers.DocumentHandler.RegisterRoutes(protected)
+			s.handlers.UserHandler.RegisterRoutes(protected)
+			s.handlers.TenantHandler.RegisterRoutes(protected)
+			s.handlers.FolderHandler.RegisterRoutes(protected)
+			s.handlers.TagHandler.RegisterRoutes(protected)
+			s.handlers.CategoryHandler.RegisterRoutes(protected)
+		}
 
 		// Add other handler routes as they're created
-		// s.handlers.WorkflowHandler.RegisterRoutes(v1)
-		// s.handlers.AnalyticsHandler.RegisterRoutes(v1)
+		// s.handlers.WorkflowHandler.RegisterRoutes(protected)
+		// s.handlers.AnalyticsHandler.RegisterRoutes(protected)
 	}
 
 	// Serve static files (if any)

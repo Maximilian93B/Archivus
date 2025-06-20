@@ -171,6 +171,7 @@ func initializeAuthService(cfg *config.Config, log *logger.Logger) *supabase.Aut
 		URL:        cfg.Supabase.URL,
 		APIKey:     cfg.Supabase.APIKey,
 		ServiceKey: cfg.Supabase.ServiceKey,
+		JWTSecret:  cfg.Supabase.JWTSecret,
 	})
 	if err != nil {
 		log.Error("Failed to initialize auth service", "error", err)

@@ -1,5 +1,5 @@
 # Archivus Makefile
-.PHONY: help build run dev test clean deps docker-build docker-run migrate
+.PHONY: help build run dev test clean deps docker-build docker-run migrate worker
 
 # Default target
 help: ## Show help message
@@ -181,7 +181,7 @@ db-test-setup:
 	@echo "Make sure you have DATABASE_URL_TEST configured in your .env file"
 
 # Docker commands
-docker-build:
+docker-build: ## Build Docker image
 	docker build -t archivus:latest .
 
 docker-run:
@@ -204,3 +204,79 @@ dev-test: test-repos test-integration
 clean-all: clean
 	docker-compose down -v
 	rm -f coverage.out coverage.html
+
+# Build the background worker
+worker:
+	CGO_ENABLED=0 go build -o bin/archivus-worker ./cmd/worker
+
+# Build both binaries
+build-all: build-linux build-windows build-darwin worker
+
+# Run the worker in development mode
+dev-worker:
+	go run ./cmd/worker
+
+# Run the application in development mode
+dev:
+	go run ./cmd/server
+
+# Run database migrations
+migration:
+	go run ./cmd/migrate
+
+# Development helpers
+dev-setup: docker-up migration
+	@echo "Development environment is ready!"
+
+# Production deployment
+deploy:
+	docker-compose -f docker-compose.yml up -d
+
+# Logs
+logs:
+	docker-compose logs -f
+
+# Worker logs specifically
+worker-logs:
+	docker-compose logs -f worker
+
+# Health check
+health:
+	curl -f http://localhost:8080/health || exit 1
+
+# Generate API documentation
+docs:
+	swag init -g cmd/server/main.go -o docs/
+
+# Phase 2 specific targets
+phase2-build: build-all docker-build-worker
+	@echo "Phase 2 build complete: API + Background Worker"
+
+phase2-test:
+	@echo "Testing complete Phase 2 pipeline: Upload → Process → Download → Preview"
+	powershell -ExecutionPolicy Bypass -File test_phase2_complete.ps1
+
+phase2-validate: docker-up
+	@echo "Phase 2 validation: Starting system and running complete pipeline test"
+	@echo "API: http://localhost:8080"
+	@echo "Worker: Processing background jobs"
+	@echo "Running comprehensive test..."
+	powershell -ExecutionPolicy Bypass -File test_phase2_complete.ps1
+
+phase2-deploy: docker-build docker-up
+	@echo "Phase 2 deployed: API + Worker + Database + Redis"
+	@echo "API: http://localhost:8080"
+	@echo "Worker: Running background file processing"
+
+# Monitor worker jobs
+monitor-jobs:
+	@echo "Monitoring background jobs..."
+	docker-compose exec redis redis-cli KEYS "*job*"
+
+# Quick development cycle
+quick-start: clean build-all docker-up migration
+	@echo "Quick start complete!"
+	@echo "API Server: http://localhost:8080"
+	@echo "Worker: Processing files in background"
+	@echo "PostgreSQL: localhost:5432"
+	@echo "Redis: localhost:6379"

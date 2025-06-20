@@ -1,0 +1,12 @@
+﻿Test Document for Archivus Pipeline
+===================================
+
+This is a test document to verify the complete file processing pipeline.
+
+Document Properties:
+- Type: Text Document  
+- Size: Small test file
+- Content: Sample text for processing
+- Date: 2025-06-18 12:56:00
+
+This document will be processed by the background worker.

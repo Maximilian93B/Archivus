@@ -152,7 +152,7 @@ type Tenant struct {
 type User struct {
 	ID                uuid.UUID  `json:"id" gorm:"type:uuid;primary_key;default:uuid_generate_v4()"`
 	TenantID          uuid.UUID  `json:"tenant_id" gorm:"type:uuid;not null;index"`
-	Email             string     `json:"email" gorm:"type:varchar(320);not null;uniqueIndex:idx_tenant_email"`
+	Email             string     `json:"email" gorm:"type:varchar(320);not null;index"`
 	PasswordHash      string     `json:"-" gorm:"type:varchar(255);not null"`
 	FirstName         string     `json:"first_name" gorm:"type:varchar(100);not null"`
 	LastName          string     `json:"last_name" gorm:"type:varchar(100);not null"`

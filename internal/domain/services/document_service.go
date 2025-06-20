@@ -629,6 +629,105 @@ func (s *DocumentService) calculateContentHash(reader io.Reader) (string, error)
 	return fmt.Sprintf("%x", hasher.Sum(nil)), nil
 }
 
+// DownloadDocument retrieves a document file from storage
+func (s *DocumentService) DownloadDocument(ctx context.Context, documentID, tenantID, userID uuid.UUID) (io.ReadCloser, error) {
+	// Get document with access control
+	document, err := s.GetDocument(ctx, documentID, tenantID, userID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get file from storage service
+	fileReader, err := s.storageService.Get(ctx, document.StoragePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to retrieve file from storage: %w", err)
+	}
+
+	// Create audit log for download
+	s.createAuditLog(ctx, tenantID, userID, documentID, models.AuditRead, "Document downloaded")
+
+	// Update analytics
+	s.analyticsRepo.UpdateDocumentDownload(ctx, documentID)
+
+	return fileReader, nil
+}
+
+// GetDocumentPreview retrieves a preview/thumbnail of a document
+func (s *DocumentService) GetDocumentPreview(ctx context.Context, documentID, tenantID, userID uuid.UUID) (io.ReadCloser, string, error) {
+	// Get document with access control
+	document, err := s.GetDocument(ctx, documentID, tenantID, userID)
+	if err != nil {
+		return nil, "", err
+	}
+
+	// Try to get generated preview/thumbnail first
+	previewPath := s.getPreviewPath(document.StoragePath)
+	thumbnailPath := s.getThumbnailPath(document.StoragePath)
+
+	// Check for existing preview
+	if previewReader, err := s.storageService.Get(ctx, previewPath); err == nil {
+		s.createAuditLog(ctx, tenantID, userID, documentID, models.AuditRead, "Document preview viewed")
+		s.analyticsRepo.UpdateDocumentView(ctx, documentID)
+		return previewReader, "text/plain", nil // Placeholder content type
+	}
+
+	// Check for existing thumbnail
+	if thumbnailReader, err := s.storageService.Get(ctx, thumbnailPath); err == nil {
+		s.createAuditLog(ctx, tenantID, userID, documentID, models.AuditRead, "Document thumbnail viewed")
+		s.analyticsRepo.UpdateDocumentView(ctx, documentID)
+		return thumbnailReader, "image/jpeg", nil // Placeholder content type
+	}
+
+	// If no preview/thumbnail exists, generate one on-demand
+	if err := s.generatePreviewOnDemand(ctx, document); err != nil {
+		// If generation fails, return a placeholder
+		placeholder := fmt.Sprintf("Preview not available for %s\nDocument Type: %s\nFile Size: %d bytes",
+			document.OriginalName, document.ContentType, document.FileSize)
+
+		return io.NopCloser(strings.NewReader(placeholder)), "text/plain", nil
+	}
+
+	// Try to get the newly generated preview
+	if previewReader, err := s.storageService.Get(ctx, previewPath); err == nil {
+		s.createAuditLog(ctx, tenantID, userID, documentID, models.AuditRead, "Document preview generated and viewed")
+		s.analyticsRepo.UpdateDocumentView(ctx, documentID)
+		return previewReader, "text/plain", nil
+	}
+
+	// Fallback to placeholder
+	placeholder := fmt.Sprintf("Preview not available for %s\nDocument Type: %s\nFile Size: %d bytes",
+		document.OriginalName, document.ContentType, document.FileSize)
+
+	return io.NopCloser(strings.NewReader(placeholder)), "text/plain", nil
+}
+
+// Helper methods for preview/thumbnail paths
+func (s *DocumentService) getPreviewPath(originalPath string) string {
+	ext := filepath.Ext(originalPath)
+	baseName := strings.TrimSuffix(originalPath, ext)
+	return fmt.Sprintf("previews/%s_preview.txt", filepath.Base(baseName))
+}
+
+func (s *DocumentService) getThumbnailPath(originalPath string) string {
+	ext := filepath.Ext(originalPath)
+	baseName := strings.TrimSuffix(originalPath, ext)
+	return fmt.Sprintf("thumbnails/%s_thumb.jpg", filepath.Base(baseName))
+}
+
+// generatePreviewOnDemand generates a preview for a document on-demand
+func (s *DocumentService) generatePreviewOnDemand(ctx context.Context, document *models.Document) error {
+	// Create background job for preview generation
+	job := &models.AIProcessingJob{
+		TenantID:   document.TenantID,
+		DocumentID: document.ID,
+		JobType:    "preview_generation",
+		Priority:   1, // High priority for on-demand generation
+		Status:     models.ProcessingQueued,
+	}
+
+	return s.aiJobRepo.Create(ctx, job)
+}
+
 // FOLDER MANAGEMENT METHODS
 
 // CreateFolder creates a new folder with proper business logic

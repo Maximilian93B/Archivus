@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"io"
 	"net/http"
 	"strconv"
 
@@ -753,26 +754,112 @@ func (h *DocumentHandler) DownloadDocument(c *gin.Context) {
 		return
 	}
 
+	// Get file from storage service
+	fileReader, err := h.documentService.DownloadDocument(c.Request.Context(), documentID, userCtx.TenantID, userCtx.UserID)
+	if err != nil {
+		if err == services.ErrDocumentNotFound {
+			c.JSON(http.StatusNotFound, ErrorResponse{
+				Error:   "file_not_found",
+				Message: "Document file not found in storage",
+			})
+			return
+		}
+
+		c.JSON(http.StatusInternalServerError, ErrorResponse{
+			Error:   "download_error",
+			Message: "Failed to download document",
+			Details: err.Error(),
+		})
+		return
+	}
+	defer fileReader.Close()
+
 	// Set headers for download
 	c.Header("Content-Disposition", `attachment; filename="`+document.OriginalName+`"`)
 	c.Header("Content-Type", document.ContentType)
 	c.Header("Content-Length", strconv.FormatInt(document.FileSize, 10))
+	c.Header("Cache-Control", "private, no-cache, no-store, must-revalidate")
+	c.Header("Pragma", "no-cache")
+	c.Header("Expires", "0")
 
-	// TODO: Stream file from storage service
-	// This would use the storage service to stream the file
-	c.JSON(http.StatusNotImplemented, ErrorResponse{
-		Error:   "not_implemented",
-		Message: "File download not yet implemented",
-	})
+	// Stream file content to client
+	_, err = io.Copy(c.Writer, fileReader)
+	if err != nil {
+		// Can't send JSON error after headers are sent, just log
+		// TODO: Add proper logging when available
+		return
+	}
 }
 
 // PreviewDocument serves a preview of the document
 func (h *DocumentHandler) PreviewDocument(c *gin.Context) {
-	// Similar to DownloadDocument but serves preview/thumbnail
-	c.JSON(http.StatusNotImplemented, ErrorResponse{
-		Error:   "not_implemented",
-		Message: "Document preview not yet implemented",
-	})
+	userCtx := middleware.GetUserContext(c)
+	if userCtx == nil {
+		c.JSON(http.StatusUnauthorized, ErrorResponse{
+			Error:   "unauthorized",
+			Message: "User not authenticated",
+		})
+		return
+	}
+
+	documentID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, ErrorResponse{
+			Error:   "invalid_document_id",
+			Message: "Invalid document ID format",
+		})
+		return
+	}
+
+	// Get document to verify access
+	document, err := h.documentService.GetDocument(c.Request.Context(), documentID, userCtx.TenantID, userCtx.UserID)
+	if err != nil {
+		if err == services.ErrDocumentNotFound {
+			c.JSON(http.StatusNotFound, ErrorResponse{
+				Error:   "document_not_found",
+				Message: "Document not found",
+			})
+			return
+		}
+
+		c.JSON(http.StatusInternalServerError, ErrorResponse{
+			Error:   "access_error",
+			Message: "Failed to access document",
+		})
+		return
+	}
+
+	// Get preview from document service
+	previewReader, contentType, err := h.documentService.GetDocumentPreview(c.Request.Context(), documentID, userCtx.TenantID, userCtx.UserID)
+	if err != nil {
+		if err == services.ErrDocumentNotFound {
+			c.JSON(http.StatusNotFound, ErrorResponse{
+				Error:   "preview_not_found",
+				Message: "Document preview not available",
+			})
+			return
+		}
+
+		c.JSON(http.StatusInternalServerError, ErrorResponse{
+			Error:   "preview_error",
+			Message: "Failed to generate preview",
+			Details: err.Error(),
+		})
+		return
+	}
+	defer previewReader.Close()
+
+	// Set headers for preview
+	c.Header("Content-Type", contentType)
+	c.Header("Cache-Control", "public, max-age=3600") // Cache for 1 hour
+	c.Header("Content-Disposition", `inline; filename="preview_`+document.OriginalName+`"`)
+
+	// Stream preview content to client
+	_, err = io.Copy(c.Writer, previewReader)
+	if err != nil {
+		// Can't send JSON error after headers are sent, just log
+		return
+	}
 }
 
 // Helper methods

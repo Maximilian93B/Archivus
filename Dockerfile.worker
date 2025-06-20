@@ -1,0 +1,44 @@
+# Use Go 1.23 Alpine as base
+FROM golang:1.23-alpine AS builder
+
+# Install git and ca-certificates (needed for fetching dependencies)
+RUN apk update && apk add --no-cache git ca-certificates
+
+# Set the working directory
+WORKDIR /app
+
+# Copy go mod files
+COPY go.mod go.sum ./
+
+# Download dependencies
+RUN go mod download
+
+# Copy source code
+COPY . .
+
+# Build the worker application
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o archivus-worker ./cmd/worker
+
+# Use Alpine Linux as the final image
+FROM alpine:latest
+
+# Install ca-certificates for HTTPS
+RUN apk --no-cache add ca-certificates
+
+WORKDIR /root/
+
+# Copy the binary from builder
+COPY --from=builder /app/archivus-worker .
+
+# Make sure the binary is executable
+RUN chmod +x ./archivus-worker
+
+# Expose metrics port (optional)
+EXPOSE 8081
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+  CMD ps aux | grep archivus-worker | grep -v grep || exit 1
+
+# Run the worker
+CMD ["./archivus-worker"] 

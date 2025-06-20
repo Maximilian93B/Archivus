@@ -59,6 +59,37 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # Background Worker for File Processing
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    container_name: archivus-worker
+    environment:
+      - ENVIRONMENT=development
+      - DATABASE_URL=postgres://postgres:postgres@postgres:5432/archivus_dev?sslmode=disable
+      - REDIS_URL=redis://redis:6379
+      - STORAGE_TYPE=local
+      - STORAGE_PATH=/app/uploads
+      - WORKER_CONCURRENT_JOBS=5
+      - WORKER_POLL_INTERVAL=10s
+      - WORKER_JOB_TIMEOUT=5m
+      - WORKER_MAX_RETRIES=3
+      - WORKER_ENABLE_THUMBNAILS=true
+      - WORKER_ENABLE_VALIDATION=true
+      - WORKER_ENABLE_METADATA=true
+      - WORKER_THUMBNAIL_MAX_SIZE=204800
+      - WORKER_THUMBNAIL_QUALITY=85
+    volumes:
+      - ./uploads:/app/uploads
+      - ./.env:/app/.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
   # Ollama (Local AI - Optional)
   ollama:
     image: ollama/ollama:latest

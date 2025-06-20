@@ -45,6 +45,9 @@ func (h *AuthHandler) SetupRoutes(router *gin.RouterGroup) {
 		auth.POST("/reset-password", h.ResetPassword)
 		auth.GET("/validate", h.ValidateToken)
 		auth.POST("/webhook", h.SupabaseWebhook)
+
+		// Admin routes for testing/development
+		auth.POST("/admin/create-verified-user", h.AdminCreateVerifiedUser)
 	}
 }
 
@@ -175,6 +178,83 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	}
 
 	h.RespondSuccess(c, response)
+}
+
+// AdminCreateVerifiedUser creates a user with email already verified (for testing/development)
+// @Summary Admin create verified user
+// @Description Create a new user with email pre-verified using admin privileges
+// @Tags auth
+// @Accept json
+// @Produce json
+// @Param request body AdminCreateUserRequest true "Admin user creation request"
+// @Success 201 {object} UserResponse
+// @Failure 400 {object} ErrorResponse
+// @Failure 409 {object} ErrorResponse
+// @Router /auth/admin/create-verified-user [post]
+func (h *AuthHandler) AdminCreateVerifiedUser(c *gin.Context) {
+	var req AdminCreateUserRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		h.RespondBadRequest(c, "Invalid request format", err.Error())
+		return
+	}
+
+	// Validate required fields
+	if err := h.validateAdminCreateUserRequest(&req); err != nil {
+		h.RespondBadRequest(c, err.Error())
+		return
+	}
+
+	// Get tenant by subdomain
+	tenantSubdomain := h.getTenantSubdomain(c)
+	tenant, err := h.tenantService.GetTenantBySubdomain(c.Request.Context(), tenantSubdomain)
+	if err != nil {
+		h.RespondBadRequest(c, "Invalid tenant", err.Error())
+		return
+	}
+
+	// Create user metadata
+	metadata := map[string]interface{}{
+		"tenant_id":  tenant.ID.String(),
+		"first_name": req.FirstName,
+		"last_name":  req.LastName,
+		"role":       req.Role,
+		"department": req.Department,
+		"job_title":  req.JobTitle,
+	}
+
+	// Create user with email verification bypassed using admin API
+	supabaseUser, err := h.supabaseAuth.AdminCreateUser(req.Email, req.Password, metadata, true)
+	if err != nil {
+		if strings.Contains(err.Error(), "already exists") {
+			h.RespondConflict(c, "User already exists in authentication system")
+		} else {
+			h.RespondBadRequest(c, "Failed to create user in authentication system", err.Error())
+		}
+		return
+	}
+
+	// TODO: Save user to local database
+	// For now, we'll create the user response directly from Supabase data
+	// In production, this would need to save to the local database first
+
+	// Return response with the created user
+	response := &UserResponse{
+		ID:            supabaseUser.ID,
+		TenantID:      tenant.ID,
+		Email:         supabaseUser.Email,
+		FirstName:     req.FirstName,
+		LastName:      req.LastName,
+		Role:          req.Role,
+		Department:    req.Department,
+		JobTitle:      req.JobTitle,
+		IsActive:      true,
+		EmailVerified: true,
+		LastLoginAt:   nil,
+		CreatedAt:     time.Now(),
+		UpdatedAt:     time.Now(),
+	}
+
+	h.RespondCreated(c, response)
 }
 
 // ValidateToken validates a Supabase access token
@@ -437,8 +517,40 @@ func (h *AuthHandler) validateRegistrationRequest(req *RegisterRequest) error {
 	return nil
 }
 
+func (h *AuthHandler) validateAdminCreateUserRequest(req *AdminCreateUserRequest) error {
+	if req.Email == "" {
+		return errors.New("email is required")
+	}
+
+	if req.Password == "" {
+		return errors.New("password is required")
+	}
+
+	if len(req.Password) < 8 {
+		return errors.New("password must be at least 8 characters")
+	}
+
+	if req.FirstName == "" {
+		return errors.New("first name is required")
+	}
+
+	if req.LastName == "" {
+		return errors.New("last name is required")
+	}
+
+	if req.Role == "" {
+		req.Role = "user" // Default role
+	}
+
+	return nil
+}
+
 func (h *AuthHandler) respondError(c *gin.Context, statusCode int, message string, err error) {
-	h.RespondError(c, statusCode, "auth_error", message, err.Error())
+	errorDetails := ""
+	if err != nil {
+		errorDetails = err.Error()
+	}
+	h.RespondError(c, statusCode, "auth_error", message, errorDetails)
 }
 
 func convertUserToResponse(user *models.User) *UserResponse {
@@ -534,4 +646,14 @@ type SupabaseWebhookPayload struct {
 	Record    map[string]interface{} `json:"record"`
 	OldRecord map[string]interface{} `json:"old_record,omitempty"`
 	Schema    string                 `json:"schema"`
+}
+
+type AdminCreateUserRequest struct {
+	Email      string `json:"email" binding:"required,email"`
+	Password   string `json:"password" binding:"required,min=8"`
+	FirstName  string `json:"first_name" binding:"required"`
+	LastName   string `json:"last_name" binding:"required"`
+	Role       string `json:"role,omitempty"`
+	Department string `json:"department,omitempty"`
+	JobTitle   string `json:"job_title,omitempty"`
 }
