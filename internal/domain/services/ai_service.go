@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"github.com/archivus/archivus/internal/domain/repositories"
 	"github.com/archivus/archivus/internal/infrastructure/database/models"
 	"github.com/google/uuid"
+	"github.com/pgvector/pgvector-go"
 )
 
 var (
@@ -19,6 +21,22 @@ var (
 	ErrInvalidFileFormat    = errors.New("invalid file format for AI processing")
 	ErrProcessingTimeout    = errors.New("AI processing timeout")
 	ErrInsufficientCredits  = errors.New("insufficient AI credits")
+)
+
+// AI Job Types - Phase 2 & 3
+const (
+	// Existing Phase 2 jobs
+	JobTypeThumbnailGeneration = "thumbnail_generation"
+	JobTypeFileValidation      = "file_validation"
+	JobTypeMetadataExtraction  = "metadata_extraction"
+	JobTypePreviewGeneration   = "preview_generation"
+
+	// New Phase 3 AI jobs
+	JobTypeDocumentSummarization  = "document_summarization"
+	JobTypeEntityExtraction       = "entity_extraction"
+	JobTypeDocumentClassification = "document_classification"
+	JobTypeEmbeddingGeneration    = "embedding_generation"
+	JobTypeSemanticAnalysis       = "semantic_analysis"
 )
 
 // AIProcessingService orchestrates AI-powered document analysis
@@ -31,6 +49,7 @@ type AIProcessingService struct {
 	auditRepo    repositories.AuditLogRepository
 
 	openAIService  OpenAIService
+	claudeService  *ClaudeService
 	ocrService     OCRService
 	storageService StorageService
 	config         AIServiceConfig
@@ -39,6 +58,8 @@ type AIProcessingService struct {
 // AIServiceConfig holds configuration for AI processing
 type AIServiceConfig struct {
 	OpenAIAPIKey             string
+	ClaudeAPIKey             string
+	PreferredProvider        string // "openai" or "claude"
 	MaxConcurrentJobs        int
 	ProcessingTimeout        time.Duration
 	EnableSemanticSearch     bool
@@ -59,6 +80,7 @@ func NewAIProcessingService(
 	tenantRepo repositories.TenantRepository,
 	auditRepo repositories.AuditLogRepository,
 	openAIService OpenAIService,
+	claudeService *ClaudeService,
 	ocrService OCRService,
 	storageService StorageService,
 	config AIServiceConfig,
@@ -71,6 +93,7 @@ func NewAIProcessingService(
 		tenantRepo:     tenantRepo,
 		auditRepo:      auditRepo,
 		openAIService:  openAIService,
+		claudeService:  claudeService,
 		ocrService:     ocrService,
 		storageService: storageService,
 		config:         config,
@@ -158,18 +181,20 @@ func (s *AIProcessingService) processJob(ctx context.Context, job *models.AIProc
 		return s.processTextExtraction(ctx, job, document, fileContent)
 	case "ocr":
 		return s.processOCR(ctx, job, document, fileContent)
-	case "categorization":
+	case "categorization", JobTypeDocumentClassification:
 		return s.processDocumentClassification(ctx, job, document)
 	case "tagging":
 		return s.processAutoTagging(ctx, job, document)
 	case "financial_extraction":
 		return s.processFinancialExtraction(ctx, job, document)
-	case "summarization":
+	case "summarization", JobTypeDocumentSummarization:
 		return s.processSummarization(ctx, job, document)
-	case "entity_extraction":
+	case JobTypeEntityExtraction:
 		return s.processEntityExtraction(ctx, job, document)
-	case "embedding_generation":
+	case JobTypeEmbeddingGeneration:
 		return s.processEmbeddingGeneration(ctx, job, document)
+	case JobTypeSemanticAnalysis:
+		return s.processSemanticAnalysis(ctx, job, document)
 	default:
 		return fmt.Errorf("unknown job type: %s", job.JobType)
 	}
@@ -241,10 +266,22 @@ func (s *AIProcessingService) processDocumentClassification(ctx context.Context,
 		return errors.New("no text available for classification")
 	}
 
-	// Use AI to classify document
-	docType, confidence, err := s.openAIService.ClassifyDocument(ctx, text)
-	if err != nil {
-		return fmt.Errorf("classification failed: %w", err)
+	var docType models.DocumentType
+	var confidence float64
+	var err error
+
+	// Use Claude for classification if available and preferred
+	if s.shouldUseClaude() {
+		docType, confidence, err = s.claudeService.ClassifyDocument(ctx, text)
+		if err != nil {
+			return fmt.Errorf("Claude classification failed: %w", err)
+		}
+	} else {
+		// Fallback to OpenAI
+		docType, confidence, err = s.openAIService.ClassifyDocument(ctx, text)
+		if err != nil {
+			return fmt.Errorf("OpenAI classification failed: %w", err)
+		}
 	}
 
 	// Update document if confidence is high enough
@@ -261,6 +298,7 @@ func (s *AIProcessingService) processDocumentClassification(ctx context.Context,
 		"document_type": string(docType),
 		"confidence":    confidence,
 		"applied":       confidence > 0.7,
+		"ai_provider":   s.getUsedProvider(),
 	}
 
 	return nil
@@ -351,10 +389,21 @@ func (s *AIProcessingService) processSummarization(ctx context.Context, job *mod
 		return errors.New("no text available for summarization")
 	}
 
-	// Generate summary using AI
-	summary, err := s.openAIService.GenerateSummary(ctx, text)
-	if err != nil {
-		return fmt.Errorf("summarization failed: %w", err)
+	var summary string
+	var err error
+
+	// Use Claude for summarization if available and preferred
+	if s.shouldUseClaude() {
+		summary, err = s.claudeService.GenerateSummary(ctx, text)
+		if err != nil {
+			return fmt.Errorf("Claude summarization failed: %w", err)
+		}
+	} else {
+		// Fallback to OpenAI
+		summary, err = s.openAIService.GenerateSummary(ctx, text)
+		if err != nil {
+			return fmt.Errorf("OpenAI summarization failed: %w", err)
+		}
 	}
 
 	// Update document with summary
@@ -367,6 +416,7 @@ func (s *AIProcessingService) processSummarization(ctx context.Context, job *mod
 		"summary":           summary,
 		"summary_length":    len(summary),
 		"compression_ratio": float64(len(summary)) / float64(len(text)),
+		"ai_provider":       s.getUsedProvider(),
 	}
 
 	return nil
@@ -379,10 +429,21 @@ func (s *AIProcessingService) processEntityExtraction(ctx context.Context, job *
 		return errors.New("no text available for entity extraction")
 	}
 
-	// Extract entities using AI
-	entities, err := s.openAIService.ExtractEntities(ctx, text)
-	if err != nil {
-		return fmt.Errorf("entity extraction failed: %w", err)
+	var entities map[string]interface{}
+	var err error
+
+	// Use Claude for entity extraction if available and preferred
+	if s.shouldUseClaude() {
+		entities, err = s.claudeService.ExtractEntities(ctx, text)
+		if err != nil {
+			return fmt.Errorf("Claude entity extraction failed: %w", err)
+		}
+	} else {
+		// Fallback to OpenAI
+		entities, err = s.openAIService.ExtractEntities(ctx, text)
+		if err != nil {
+			return fmt.Errorf("OpenAI entity extraction failed: %w", err)
+		}
 	}
 
 	// Store extracted entities in document
@@ -398,6 +459,7 @@ func (s *AIProcessingService) processEntityExtraction(ctx context.Context, job *
 	job.Result = models.JSONB{
 		"entities":     entities,
 		"entity_count": len(entities),
+		"ai_provider":  s.getUsedProvider(),
 	}
 
 	return nil
@@ -417,8 +479,9 @@ func (s *AIProcessingService) processEmbeddingGeneration(ctx context.Context, jo
 	}
 
 	// Update document with embedding
-	// Note: You'll need to convert []float32 to pgvector.Vector
-	// document.Embedding = pgvector.NewVector(embedding)
+	// Convert []float32 to pgvector.Vector pointer
+	vector := pgvector.NewVector(embedding)
+	document.Embedding = &vector
 	if err := s.documentRepo.Update(ctx, document); err != nil {
 		return fmt.Errorf("failed to update document: %w", err)
 	}
@@ -429,6 +492,110 @@ func (s *AIProcessingService) processEmbeddingGeneration(ctx context.Context, jo
 	}
 
 	return nil
+}
+
+// processSemanticAnalysis performs semantic analysis on documents
+func (s *AIProcessingService) processSemanticAnalysis(ctx context.Context, job *models.AIProcessingJob, document *models.Document) error {
+	text := s.getDocumentText(document)
+	if text == "" {
+		return errors.New("no text available for semantic analysis")
+	}
+
+	// Use Claude for semantic analysis if available and preferred
+	if s.shouldUseClaude() {
+		// Perform comprehensive semantic analysis with Claude
+		analysisData, err := s.performClaudeSemanticAnalysis(ctx, text, document.DocumentType)
+		if err != nil {
+			return fmt.Errorf("Claude semantic analysis failed: %w", err)
+		}
+
+		// Store analysis results
+		if document.ExtractedData == nil {
+			document.ExtractedData = make(models.JSONB)
+		}
+		document.ExtractedData["semantic_analysis"] = analysisData
+
+		if err := s.documentRepo.Update(ctx, document); err != nil {
+			return fmt.Errorf("failed to update document: %w", err)
+		}
+
+		job.Result = models.JSONB(analysisData)
+		return nil
+	}
+
+	// Fallback to OpenAI-based analysis
+	job.Result = models.JSONB{
+		"status": "completed",
+		"note":   "Semantic analysis requires Claude service to be enabled",
+	}
+	return nil
+}
+
+// shouldUseClaude determines whether to use Claude over OpenAI
+func (s *AIProcessingService) shouldUseClaude() bool {
+	return s.claudeService != nil &&
+		s.claudeService.IsEnabled() &&
+		(s.config.PreferredProvider == "claude" || s.config.OpenAIAPIKey == "")
+}
+
+// getUsedProvider returns the AI provider being used
+func (s *AIProcessingService) getUsedProvider() string {
+	if s.shouldUseClaude() {
+		return "claude"
+	}
+	return "openai"
+}
+
+// performClaudeSemanticAnalysis performs comprehensive semantic analysis using Claude
+func (s *AIProcessingService) performClaudeSemanticAnalysis(ctx context.Context, text string, docType models.DocumentType) (map[string]interface{}, error) {
+	prompt := fmt.Sprintf(`Perform comprehensive semantic analysis of this %s document. Provide detailed insights including:
+
+1. Document Structure Analysis:
+   - Main sections and organization
+   - Information hierarchy
+   - Key relationships between concepts
+
+2. Content Analysis:
+   - Primary themes and topics
+   - Sentiment and tone
+   - Writing style and complexity
+   - Key arguments or conclusions
+
+3. Business Context:
+   - Industry relevance
+   - Compliance considerations
+   - Risk factors mentioned
+   - Action items or decisions
+
+4. Metadata Insights:
+   - Importance/priority indicators
+   - Stakeholders mentioned
+   - Timeline references
+   - Financial implications
+
+Return as structured JSON with clear categories.
+
+Document:
+%s`, docType, text)
+
+	response, err := s.claudeService.makeRequest(ctx, prompt, false)
+	if err != nil {
+		return nil, err
+	}
+
+	// Try to parse as JSON, fall back to structured response
+	var analysisData map[string]interface{}
+	if err := json.Unmarshal([]byte(response), &analysisData); err != nil {
+		// If JSON parsing fails, create structured response
+		analysisData = map[string]interface{}{
+			"raw_analysis":  response,
+			"analysis_type": "comprehensive_semantic",
+			"document_type": string(docType),
+			"timestamp":     time.Now().Unix(),
+		}
+	}
+
+	return analysisData, nil
 }
 
 // QueueDocumentProcessing queues AI processing jobs for a document

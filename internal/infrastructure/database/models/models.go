@@ -197,12 +197,12 @@ type Document struct {
 	PreviewPath   string `json:"preview_path" gorm:"type:varchar(500)"`
 
 	// Content Analysis
-	ExtractedText string          `json:"extracted_text" gorm:"type:text"`
-	ContentHash   string          `json:"content_hash" gorm:"type:varchar(64);not null;index"`
-	OCRText       string          `json:"ocr_text" gorm:"type:text"`
-	Summary       string          `json:"summary" gorm:"type:text"`
-	AIConfidence  float64         `json:"ai_confidence" gorm:"type:decimal(3,2)"`
-	Embedding     pgvector.Vector `json:"-" gorm:"type:vector(1536)"`
+	ExtractedText string           `json:"extracted_text" gorm:"type:text"`
+	ContentHash   string           `json:"content_hash" gorm:"type:varchar(64);not null;index"`
+	OCRText       string           `json:"ocr_text" gorm:"type:text"`
+	Summary       string           `json:"summary" gorm:"type:text"`
+	AIConfidence  float64          `json:"ai_confidence" gorm:"type:decimal(3,2)"`
+	Embedding     *pgvector.Vector `json:"-" gorm:"type:vector(1536)"`
 
 	// Document Metadata
 	Title        string       `json:"title" gorm:"type:varchar(255)"`

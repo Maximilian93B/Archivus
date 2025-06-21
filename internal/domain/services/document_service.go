@@ -220,6 +220,10 @@ func (s *DocumentService) UploadDocument(ctx context.Context, params UploadDocum
 		CustomFields: models.JSONB(params.CustomFields),
 	}
 
+	// Initialize embedding to prevent PostgreSQL vector dimension errors
+	// When no AI service is available, we leave embedding as nil (NULL in database)
+	// This prevents the "vector must have at least 1 dimension" error
+
 	// Set default title if not provided
 	if document.Title == "" {
 		document.Title = s.generateTitle(params.File.Filename)
@@ -554,30 +558,64 @@ func (s *DocumentService) processCategories(ctx context.Context, documentID, ten
 }
 
 func (s *DocumentService) queueAIProcessing(ctx context.Context, document *models.Document, enableOCR bool) error {
-	jobs := []string{"text_extraction", "categorization", "tagging"}
-
-	if enableOCR {
-		jobs = append(jobs, "ocr")
+	// Phase 3 AI job types - Core document intelligence processing
+	jobs := []string{
+		JobTypeDocumentSummarization,  // Generate intelligent summaries
+		JobTypeEntityExtraction,       // Extract people, organizations, dates, amounts
+		JobTypeDocumentClassification, // Classify document type with confidence
+		JobTypeSemanticAnalysis,       // Generate tags and semantic understanding
 	}
 
+	// Add embedding generation for semantic search (requires OpenAI or similar)
+	// Note: Claude doesn't provide embeddings directly
+	if s.aiService != nil {
+		jobs = append(jobs, JobTypeEmbeddingGeneration)
+	}
+
+	// Add OCR processing if requested and document is image-based
+	if enableOCR && s.isImageDocument(document.ContentType) {
+		jobs = append(jobs, "ocr_extraction")
+	}
+
+	// Add specialized financial processing for financial documents
 	if s.isFinancialDocument(document.DocumentType) {
 		jobs = append(jobs, "financial_extraction")
 	}
 
-	for _, jobType := range jobs {
+	// Queue AI jobs with appropriate priorities
+	for i, jobType := range jobs {
 		job := &models.AIProcessingJob{
 			TenantID:   document.TenantID,
 			DocumentID: document.ID,
 			JobType:    jobType,
-			Priority:   5,
+			Priority:   5 - i, // Higher priority for earlier jobs (summarization first)
+			Status:     models.ProcessingQueued,
 		}
 
 		if err := s.aiJobRepo.Create(ctx, job); err != nil {
-			return err
+			return fmt.Errorf("failed to queue AI job %s: %w", jobType, err)
 		}
 	}
 
 	return nil
+}
+
+// isImageDocument checks if the document is image-based and would benefit from OCR
+func (s *DocumentService) isImageDocument(contentType string) bool {
+	imageTypes := []string{
+		"image/jpeg",
+		"image/png",
+		"image/tiff",
+		"image/bmp",
+		"application/pdf", // PDFs might contain scanned images
+	}
+
+	for _, imageType := range imageTypes {
+		if strings.HasPrefix(contentType, imageType) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *DocumentService) generateThumbnail(ctx context.Context, document *models.Document) error {
@@ -1478,4 +1516,113 @@ func (s *DocumentService) DeleteCategory(ctx context.Context, categoryID, tenant
 type CategoryWithCount struct {
 	models.Category
 	DocumentCount int `json:"document_count"`
+}
+
+// GetDocumentAIResults retrieves AI processing results for a document
+func (s *DocumentService) GetDocumentAIResults(ctx context.Context, documentID, tenantID uuid.UUID) (*AIResultsResponse, error) {
+	// Get completed AI jobs for the document
+	jobs, err := s.aiJobRepo.ListByDocument(ctx, documentID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get AI jobs: %w", err)
+	}
+
+	result := &AIResultsResponse{
+		DocumentID: documentID,
+		HasResults: false,
+	}
+
+	// Process each completed job and extract results
+	for _, job := range jobs {
+		if job.Status != models.ProcessingCompleted || job.Result == nil {
+			continue
+		}
+
+		result.HasResults = true
+		if job.CompletedAt != nil {
+			result.ProcessedAt = job.CompletedAt
+		}
+
+		// Extract results based on job type
+		switch job.JobType {
+		case JobTypeDocumentSummarization:
+			if summary, ok := job.Result["summary"].(string); ok && summary != "" {
+				result.Summary = &summary
+			}
+
+		case JobTypeEntityExtraction:
+			if entities, ok := job.Result["entities"].(map[string]interface{}); ok {
+				result.Entities = entities
+			}
+
+		case JobTypeDocumentClassification:
+			if docType, ok := job.Result["document_type"].(string); ok {
+				if confidence, ok := job.Result["confidence"].(float64); ok {
+					reasoning, _ := job.Result["reasoning"].(string)
+					result.Classification = &DocumentClassification{
+						Type:       models.DocumentType(docType),
+						Confidence: confidence,
+						Reasoning:  reasoning,
+					}
+				}
+			}
+
+		case JobTypeSemanticAnalysis:
+			if tags, ok := job.Result["tags"].([]interface{}); ok {
+				var tagStrings []string
+				for _, tag := range tags {
+					if tagStr, ok := tag.(string); ok {
+						tagStrings = append(tagStrings, tagStr)
+					}
+				}
+				result.Tags = tagStrings
+			}
+		}
+	}
+
+	return result, nil
+}
+
+// GetDocumentJobs retrieves AI processing jobs for a document
+func (s *DocumentService) GetDocumentJobs(ctx context.Context, documentID, tenantID uuid.UUID) ([]models.AIProcessingJob, error) {
+	jobs, err := s.aiJobRepo.ListByDocument(ctx, documentID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get AI jobs: %w", err)
+	}
+
+	// Filter jobs to only include AI processing jobs (not file processing)
+	var aiJobs []models.AIProcessingJob
+	aiJobTypes := map[string]bool{
+		JobTypeDocumentSummarization:  true,
+		JobTypeEntityExtraction:       true,
+		JobTypeDocumentClassification: true,
+		JobTypeSemanticAnalysis:       true,
+		JobTypeEmbeddingGeneration:    true,
+		"financial_extraction":        true,
+		"ocr_extraction":              true,
+	}
+
+	for _, job := range jobs {
+		if aiJobTypes[job.JobType] {
+			aiJobs = append(aiJobs, job)
+		}
+	}
+
+	return aiJobs, nil
+}
+
+// Response types for AI processing
+type AIResultsResponse struct {
+	DocumentID     uuid.UUID               `json:"document_id"`
+	Summary        *string                 `json:"summary,omitempty"`
+	Entities       map[string]interface{}  `json:"entities,omitempty"`
+	Classification *DocumentClassification `json:"classification,omitempty"`
+	Tags           []string                `json:"tags,omitempty"`
+	ProcessedAt    *time.Time              `json:"processed_at,omitempty"`
+	HasResults     bool                    `json:"has_results"`
+}
+
+type DocumentClassification struct {
+	Type       models.DocumentType `json:"type"`
+	Confidence float64             `json:"confidence"`
+	Reasoning  string              `json:"reasoning,omitempty"`
 }

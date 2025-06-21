@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/archivus/archivus/internal/app/middleware"
 	"github.com/archivus/archivus/internal/domain/repositories"
@@ -98,6 +99,8 @@ func (h *DocumentHandler) RegisterRoutes(router *gin.RouterGroup) {
 		docs.DELETE("/:id", h.DeleteDocument)
 		docs.GET("/:id/download", h.DownloadDocument)
 		docs.GET("/:id/preview", h.PreviewDocument)
+		docs.GET("/:id/ai-results", h.GetDocumentAIResults)
+		docs.GET("/:id/jobs", h.GetDocumentJobs)
 		docs.POST("/:id/process-financial", h.ProcessFinancialDocument)
 		docs.GET("/duplicates", h.FindDuplicates)
 		docs.GET("/expiring", h.GetExpiringDocuments)
@@ -251,6 +254,7 @@ func (h *DocumentHandler) GetDocument(c *gin.Context) {
 		return
 	}
 
+	// Verify document access
 	document, err := h.documentService.GetDocument(c.Request.Context(), documentID, userCtx.TenantID, userCtx.UserID)
 	if err != nil {
 		if err == services.ErrDocumentNotFound {
@@ -736,7 +740,7 @@ func (h *DocumentHandler) DownloadDocument(c *gin.Context) {
 		return
 	}
 
-	// Get document to verify access
+	// Verify document access
 	document, err := h.documentService.GetDocument(c.Request.Context(), documentID, userCtx.TenantID, userCtx.UserID)
 	if err != nil {
 		if err == services.ErrDocumentNotFound {
@@ -811,7 +815,7 @@ func (h *DocumentHandler) PreviewDocument(c *gin.Context) {
 		return
 	}
 
-	// Get document to verify access
+	// Verify document access
 	document, err := h.documentService.GetDocument(c.Request.Context(), documentID, userCtx.TenantID, userCtx.UserID)
 	if err != nil {
 		if err == services.ErrDocumentNotFound {
@@ -860,6 +864,135 @@ func (h *DocumentHandler) PreviewDocument(c *gin.Context) {
 		// Can't send JSON error after headers are sent, just log
 		return
 	}
+}
+
+// GetDocumentAIResults retrieves AI processing results for a document
+// @Summary Get AI processing results
+// @Description Retrieve AI-generated summaries, entities, classifications, and tags for a document
+// @Tags documents
+// @Produce json
+// @Param id path string true "Document ID"
+// @Success 200 {object} AIResultsResponse
+// @Failure 404 {object} ErrorResponse
+// @Router /api/v1/documents/{id}/ai-results [get]
+func (h *DocumentHandler) GetDocumentAIResults(c *gin.Context) {
+	userCtx, ok := h.AuthenticateUser(c)
+	if !ok {
+		return
+	}
+
+	documentID, ok := h.ValidateUUID(c, "document ID", c.Param("id"))
+	if !ok {
+		return
+	}
+
+	// Verify document access
+	_, err := h.documentService.GetDocument(c.Request.Context(), documentID, userCtx.TenantID, userCtx.UserID)
+	if err != nil {
+		if err == services.ErrDocumentNotFound {
+			c.JSON(http.StatusNotFound, ErrorResponse{
+				Error:   "document_not_found",
+				Message: "Document not found",
+			})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, ErrorResponse{
+			Error:   "internal_error",
+			Message: "Failed to retrieve document",
+		})
+		return
+	}
+
+	// Get AI processing results
+	results, err := h.documentService.GetDocumentAIResults(c.Request.Context(), documentID, userCtx.TenantID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, ErrorResponse{
+			Error:   "ai_results_error",
+			Message: "Failed to retrieve AI processing results",
+			Details: err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, results)
+}
+
+// GetDocumentJobs retrieves AI processing job status for a document
+// @Summary Get AI job status
+// @Description Retrieve the status of AI processing jobs for a document
+// @Tags documents
+// @Produce json
+// @Param id path string true "Document ID"
+// @Success 200 {object} JobsResponse
+// @Failure 404 {object} ErrorResponse
+// @Router /api/v1/documents/{id}/jobs [get]
+func (h *DocumentHandler) GetDocumentJobs(c *gin.Context) {
+	userCtx, ok := h.AuthenticateUser(c)
+	if !ok {
+		return
+	}
+
+	documentID, ok := h.ValidateUUID(c, "document ID", c.Param("id"))
+	if !ok {
+		return
+	}
+
+	// Verify document access
+	_, err := h.documentService.GetDocument(c.Request.Context(), documentID, userCtx.TenantID, userCtx.UserID)
+	if err != nil {
+		if err == services.ErrDocumentNotFound {
+			c.JSON(http.StatusNotFound, ErrorResponse{
+				Error:   "document_not_found",
+				Message: "Document not found",
+			})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, ErrorResponse{
+			Error:   "internal_error",
+			Message: "Failed to retrieve document",
+		})
+		return
+	}
+
+	// Get AI processing jobs
+	jobs, err := h.documentService.GetDocumentJobs(c.Request.Context(), documentID, userCtx.TenantID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, ErrorResponse{
+			Error:   "jobs_error",
+			Message: "Failed to retrieve AI processing jobs",
+			Details: err.Error(),
+		})
+		return
+	}
+
+	response := JobsResponse{
+		DocumentID: documentID,
+		Jobs:       jobs,
+	}
+
+	c.JSON(http.StatusOK, response)
+}
+
+// Response types for AI processing
+type AIResultsResponse struct {
+	DocumentID     uuid.UUID               `json:"document_id"`
+	Summary        *string                 `json:"summary,omitempty"`
+	Entities       map[string]interface{}  `json:"entities,omitempty"`
+	Classification *DocumentClassification `json:"classification,omitempty"`
+	Tags           []string                `json:"tags,omitempty"`
+	ProcessedAt    *time.Time              `json:"processed_at,omitempty"`
+	HasResults     bool                    `json:"has_results"`
+}
+
+type DocumentClassification struct {
+	Type       models.DocumentType `json:"type"`
+	Confidence float64             `json:"confidence"`
+	Reasoning  string              `json:"reasoning,omitempty"`
+}
+
+type JobsResponse struct {
+	DocumentID uuid.UUID                `json:"document_id"`
+	Jobs       []models.AIProcessingJob `json:"jobs"`
 }
 
 // Helper methods

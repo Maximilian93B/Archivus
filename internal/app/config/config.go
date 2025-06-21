@@ -69,6 +69,7 @@ type SupabaseConfig struct {
 type AIConfig struct {
 	OpenAI  OpenAIConfig
 	Ollama  OllamaConfig
+	Claude  ClaudeConfig
 	Enabled bool
 }
 
@@ -81,6 +82,18 @@ type OpenAIConfig struct {
 type OllamaConfig struct {
 	Host  string
 	Model string
+}
+
+type ClaudeConfig struct {
+	APIKey         string  `json:"api_key"`
+	BaseURL        string  `json:"base_url"`
+	Model          string  `json:"model"`
+	MaxTokens      int     `json:"max_tokens"`
+	Temperature    float64 `json:"temperature"`
+	TimeoutSeconds int     `json:"timeout_seconds"`
+	RateLimitRPM   int     `json:"rate_limit_rpm"`
+	RetryAttempts  int     `json:"retry_attempts"`
+	Enabled        bool    `json:"enabled"`
 }
 
 type FeatureConfig struct {
@@ -155,6 +168,17 @@ func Load() (*Config, error) {
 				Host:  getEnv("OLLAMA_HOST", "http://localhost:11434"),
 				Model: getEnv("OLLAMA_MODEL", "llama2"),
 			},
+			Claude: ClaudeConfig{
+				APIKey:         getEnv("CLAUDE_API_KEY", ""),
+				BaseURL:        getEnv("CLAUDE_BASE_URL", "https://api.anthropic.com"),
+				Model:          getEnv("CLAUDE_MODEL", "claude-sonnet-4-20250514"),
+				MaxTokens:      parseInt(getEnv("CLAUDE_MAX_TOKENS", "64000")),
+				Temperature:    parseFloat(getEnv("CLAUDE_TEMPERATURE", "0.1")),
+				TimeoutSeconds: parseInt(getEnv("CLAUDE_TIMEOUT_SECONDS", "60")),
+				RateLimitRPM:   parseInt(getEnv("CLAUDE_RATE_LIMIT_RPM", "1000")),
+				RetryAttempts:  parseInt(getEnv("CLAUDE_RETRY_ATTEMPTS", "3")),
+				Enabled:        parseBool(getEnv("ENABLE_CLAUDE", "false")),
+			},
 			Enabled: parseBool(getEnv("ENABLE_AI_PROCESSING", "false")),
 		},
 		Features: FeatureConfig{
@@ -209,8 +233,11 @@ func validate(config *Config) error {
 	if config.JWT.Secret == "" {
 		return fmt.Errorf("JWT_SECRET is required")
 	}
-	if config.Features.AIProcessing && config.AI.OpenAI.APIKey == "" {
-		return fmt.Errorf("OPENAI_API_KEY is required when AI processing is enabled")
+	if config.Features.AIProcessing && config.AI.OpenAI.APIKey == "" && !config.AI.Claude.Enabled {
+		return fmt.Errorf(" CLAUDE_API_KEY is required when AI processing is enabled and Claude is not enabled")
+	}
+	if config.AI.Claude.Enabled && config.AI.Claude.APIKey == "" {
+		return fmt.Errorf("CLAUDE_API_KEY is required when Claude is enabled")
 	}
 	return nil
 }
@@ -248,4 +275,11 @@ func parseDuration(value string) time.Duration {
 		return d
 	}
 	return 0
+}
+
+func parseFloat(value string) float64 {
+	if f, err := strconv.ParseFloat(value, 64); err == nil {
+		return f
+	}
+	return 0.0
 }
